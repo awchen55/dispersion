@@ -1,0 +1,1952 @@
+---
+title: "DD Interspecies Analysis"
+output: html_document
+date: "2026-03-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Results and Packages
+
+```{r}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(Matrix)
+library(purrr)
+library(ggpubr)
+library(stringr)
+library(scales)
+```
+
+We load DD results.
+```{r}
+path_data <- '/project/gilad/awchen55/differentialDispersion/results/variability_paper/data/'
+results_path <- '/project/gilad/awchen55/differentialDispersion/results/variability_paper/'
+
+dd_results <- read.csv(paste0(path_data,"DD_interspecies_results.csv"))[,-1]
+head(dd_results)
+
+round_up_signif <- function(p, digits = 1) {
+  
+  if (p < 2e-16) {
+    return("2 %*% 10^{-16}")
+  }
+  
+  # round up
+  if (p != 0) {
+    expo  <- floor(log10(p))
+    scale <- 10^(expo - digits + 1)
+    p <- ceiling(p / scale) * scale
+  }
+  
+  # force decimal formatting
+  if (p >= 1e-4) {
+    dec <- min(max(0, -floor(log10(p))), 4)
+    return(formatC(p, format = "f", digits = dec))
+  }
+  
+  # scientific notation
+  expo <- floor(log10(p))
+  base <- round(p / 10^expo, digits)
+  
+  paste0(base, " %*% 10^{", expo, "}")
+}
+```
+
+
+## Summary Tables
+
+### Number of DD Genes
+
+```{r}
+
+# vector of cell types
+celltypes <- c( "Neuroblast","ENS.glia","Radial.glia","Neuronal.IPC","Glioblast")
+
+summary_table <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col  <- paste0("dd.lfsr.diploid.", ct)
+  recap_col <- paste0("dd.recapitulated.same.sign.", ct)
+
+  dd_flag <- dd_results[[lfsr_col]] < 0.05
+
+  dd_total <- sum(dd_flag, na.rm = TRUE)
+  recap_total <- sum(dd_flag & dd_results[[recap_col]] == 1, na.rm = TRUE)
+
+  tibble(
+    CellType = gsub("\\.", " ", ct),
+    `DD Genes` = dd_total,
+    Recapitulated = recap_total,
+    `% Recapitulated` = recap_total / dd_total
+  )
+})
+
+summary_table
+```
+
+### Plot of DD Genes
+
+```{r}
+
+df_totals <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col  <- paste0("dd.lfsr.diploid.", ct)
+  recap_col <- paste0("dd.recapitulated.same.sign.", ct)
+
+  # DD genes in diploid
+  dd_flag <- !is.na(dd_results[[lfsr_col]]) & dd_results[[lfsr_col]] < 0.05
+
+  # Recapitulated among DD genes
+  recap_flag <- dd_flag & !is.na(dd_results[[recap_col]]) & dd_results[[recap_col]] == 1
+
+  n_dd    <- sum(dd_flag, na.rm = TRUE)
+  n_recap <- sum(recap_flag, na.rm = TRUE)
+  n_not   <- n_dd - n_recap
+
+  tibble::tibble(
+    CellType = ct,
+    Not_Recapitulated = n_not,
+    Recapitulated     = n_recap
+  )
+}) %>%
+  dplyr::mutate(
+    CellType_label = gsub("\\.", " ", CellType),
+    CellType_label = factor(
+      CellType_label,
+      levels = gsub("\\.", " ", celltypes)
+    )
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(Not_Recapitulated, Recapitulated),
+    names_to = "List",
+    values_to = "DV_Genes"
+  ) %>%
+  dplyr::mutate(
+    List = factor(List, levels = c("Not_Recapitulated", "Recapitulated"))
+  )
+
+dd_gene_plot <- ggplot2::ggplot(
+  df_totals,
+  ggplot2::aes(x = CellType_label, y = DV_Genes, fill = List)
+) +
+  ggplot2::geom_col() +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 920),
+    breaks = c(0, 200, 400, 600, 800),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(
+    x = "",
+    y = "# DD genes (LFSR < 0.05)",
+    title = ""
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(size = 15, face = "bold", hjust = 0.5),
+    panel.grid = ggplot2::element_blank(),
+    axis.line = ggplot2::element_line(color = "black", linewidth = 0.4),
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12),
+    legend.position = c(0.01, 0.99),
+    legend.justification = c("left", "top"),
+    legend.title = ggplot2::element_blank(),
+    legend.background = ggplot2::element_rect(fill = NA, color = NA),
+    legend.text = ggplot2::element_text(size = 12),
+    legend.key.size = grid::unit(0.4, "cm")
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c(
+      "Not_Recapitulated" = "gray87",
+      "Recapitulated"     = "lightskyblue"
+    ),
+    labels = c(
+      "Not_Recapitulated" = "Not Recapitulated",
+      "Recapitulated"     = "Recapitulated"
+    )
+  )
+
+dd_gene_plot
+#ggplot2::ggsave(filename = paste0(results_path, "dd_genes.pdf"), plot = dd_gene_plot,  device = "pdf", width = 7, height = 5, units = "in")
+```
+
+## Examples of DD Genes
+
+We load the cell annotated data.
+```{r}
+path <- '/project/gilad/awchen55/differentialDispersion/data/crossfilt_clustered_data/cell_annotations/'
+
+diploid_crossfilt_data <- readRDS(paste0(path,'parent_crossfilt_celltypes_of_interest.rds'))
+```
+
+
+### DD but not DE
+
+Normalize cell counts.
+```{r}
+ct = "Radial glia"
+# Subset to Radial glia cells only
+ct_obj <- subset(diploid_crossfilt_data, subset = celltype == ct)
+
+# Recompute CPM on this subset
+counts <- GetAssayData(ct_obj, assay = "RNA", slot = "counts")
+cpm_mat <- edgeR::cpm(counts, log = TRUE, prior.count = 0)
+```
+
+Plot distribution of expression.
+```{r}
+gene <- "DNAH14"
+ct   <- "Radial.glia"
+
+de_col <- paste0("de.adj.pvalue.diploid.", ct)
+dd_col <- paste0("dd.lfsr.diploid.", ct)
+
+vals <- dd_results %>%
+  dplyr::filter(gene == !!gene) %>%
+  dplyr::select(
+    de = !!rlang::sym(de_col),
+    dd = !!rlang::sym(dd_col)
+  ) %>%
+  dplyr::slice(1)
+
+plot_df <- data.frame(
+  expr    = as.numeric(cpm_mat[gene, ]),
+  species = ct_obj$species
+)
+
+# rounding helpers
+round_down <- function(x, digits = 1) {
+  floor(x * 10^digits) / 10^digits
+}
+
+round_up <- function(x, digits = 2) {
+  ceiling(x * 10^digits) / 10^digits
+}
+
+de_label <- format(round_down(vals$de, 1), nsmall = 1)
+dd_label <- format(round_up(vals$dd, 2), nsmall = 2)
+
+# plotmath label
+label_expr <- bquote(
+  atop(
+    bold("DE:") ~ "FDR > " ~ .(de_label),
+    bold("DD:") ~ "LFSR < " ~ .(dd_label)
+  )
+)
+
+x_pos <- 9.49
+y_pos <- Inf
+
+dd_ex1_plot <- ggplot2::ggplot(
+  plot_df,
+  ggplot2::aes(x = expr, color = species, fill = species)
+) +
+  ggplot2::geom_density(alpha = 0.3, linewidth = 1) +
+  ggplot2::scale_color_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::labs(
+    x = "Expression (log2 CPM)",
+    y = "Density",
+    title = bquote(italic(.(gene)))
+  ) +
+  ggplot2::annotate(
+    "label",
+    x = x_pos, y = y_pos,
+    label = as.character(as.expression(label_expr)),
+    parse = TRUE,
+    hjust = 0,
+    vjust = 1.25,
+    size = 4,
+    label.size = 0.3,
+    label.padding = grid::unit(0.25, "lines"),
+    fill = "white",
+    color = "black"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    plot.title   = ggplot2::element_text(size = 14),
+    axis.title   = ggplot2::element_text(size = 14),
+    axis.text    = ggplot2::element_text(size = 12),
+    axis.line    = ggplot2::element_blank(),
+    legend.position = c(0.02, 0.98),
+    legend.justification = c("left", "top"),
+    legend.text  = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_blank()
+  ) +
+  ggplot2::guides(
+    color = ggplot2::guide_legend(title = NULL),
+    fill  = ggplot2::guide_legend(title = NULL)
+  )
+
+dd_ex1_plot
+#ggsave(paste0(results_path, 'dd_gene_ex_dd.pdf'), plot = dd_ex1_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+### DD and DE Opposite Signs
+
+Normalize cell counts.
+```{r}
+ct = "Glioblast"
+# Subset to glioblast cells only
+ct_obj <- subset(diploid_crossfilt_data, subset = celltype == ct)
+
+# Recompute CPM on this subset
+counts <- GetAssayData(ct_obj, assay = "RNA", slot = "counts")
+cpm_mat <- edgeR::cpm(counts, log = TRUE, prior.count = 0)
+```
+
+Plot distribution of expression.
+```{r}
+gene <- "CCT3"
+ct   <- "Glioblast"
+
+de_col <- paste0("de.adj.pvalue.diploid.", ct)
+dd_col <- paste0("dd.lfsr.diploid.", ct)
+
+vals <- dd_results %>%
+  dplyr::filter(gene == !!gene) %>%
+  dplyr::select(
+    de = !!rlang::sym(de_col),
+    dd = !!rlang::sym(dd_col)
+  ) %>%
+  dplyr::slice(1)
+
+plot_df <- data.frame(
+  expr    = as.numeric(cpm_mat[gene, ]),
+  species = ct_obj$species
+)
+
+# rounding helpers
+round_down <- function(x, digits = 1) {
+  floor(x * 10^digits) / 10^digits
+}
+
+round_up <- function(x, digits = 2) {
+  ceiling(x * 10^digits) / 10^digits
+}
+
+de_label <- format(round_up(vals$de, 2), nsmall = 2)
+dd_label <- format(round_up(vals$dd, 2), nsmall = 2)
+
+# plotmath label
+label_expr <- bquote(
+  atop(
+    bold("DE:") ~ "FDR < " ~ .(de_label),
+    bold("DD:") ~ "LFSR < " ~ .(dd_label)
+  )
+)
+
+x_pos <- 9.38
+y_pos <- Inf
+
+dd_ex2_plot <- ggplot2::ggplot(
+  plot_df,
+  ggplot2::aes(x = expr, color = species, fill = species)
+) +
+  ggplot2::geom_density(alpha = 0.3, linewidth = 1) +
+  ggplot2::scale_color_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::labs(
+    x = "Expression (log2 CPM)",
+    y = "Density",
+    title = bquote(italic(.(gene)))
+  ) +
+  ggplot2::annotate(
+    "label",
+    x = x_pos, y = y_pos,
+    label = as.character(as.expression(label_expr)),
+    parse = TRUE,
+    hjust = 0,
+    vjust = 1.25,
+    size = 4,
+    label.size = 0.3,
+    label.padding = grid::unit(0.25, "lines"),
+    fill = "white",
+    color = "black"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    plot.title   = ggplot2::element_text(size = 14),
+    axis.title   = ggplot2::element_text(size = 14),
+    axis.text    = ggplot2::element_text(size = 12),
+    axis.line    = ggplot2::element_blank(),
+    legend.position = c(0.02, 0.98),
+    legend.justification = c("left", "top"),
+    legend.text  = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_blank()
+  ) +
+  ggplot2::guides(
+    color = ggplot2::guide_legend(title = NULL),
+    fill  = ggplot2::guide_legend(title = NULL)
+  )
+
+dd_ex2_plot
+#ggsave(paste0(results_path, 'dd_gene_ex_de2.pdf'), plot = dd_ex2_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+## Effect Size Plot
+
+We plot DD effect sizes of human vs chimpanzee comparisons. This includes all cell types together. Light grey represents DD genes in the diploid (LFSR < 0.05) and black shows the subset recapitulated in the allotetraploid (LFSR < 0.05 and same sign of effect).
+```{r}
+plot_df <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col   <- paste0("dd.lfsr.diploid.", ct)
+  same_col   <- paste0("dd.recapitulated.same.sign.", ct)
+  dip_col    <- paste0("dd.logFC.diploid.", ct)
+  allo_col   <- paste0("dd.logFC.allotetraploid.", ct)
+
+  dd_results %>%
+    dplyr::select(
+      gene,
+      all_of(lfsr_col),
+      all_of(same_col),
+      all_of(dip_col),
+      all_of(allo_col)
+    ) %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      sig_dd = .data[[lfsr_col]] < 0.05,
+      same_sign = as.integer(.data[[same_col]]),   # 1 = black, 0/NA = grey
+      diploid_logFC = as.numeric(.data[[dip_col]]),
+      allotetraploid_logFC = as.numeric(.data[[allo_col]])
+    ) %>%
+    dplyr::filter(
+      sig_dd,
+      !is.na(diploid_logFC),
+      !is.na(allotetraploid_logFC)
+    ) %>%
+    dplyr::mutate(
+      same_sign = dplyr::if_else(is.na(same_sign), 0L, same_sign)
+    )
+}) %>%
+  dplyr::distinct(
+    gene, celltype, same_sign, diploid_logFC, allotetraploid_logFC
+  )
+
+# -----------------------------
+# Quadrant percentages
+# if you want only black dots, add:
+# %>% dplyr::filter(same_sign == 1)
+# -----------------------------
+quad_df <- plot_df %>%
+  dplyr::mutate(
+    quadrant = dplyr::case_when(
+      allotetraploid_logFC >= 0 & diploid_logFC >= 0 ~ "TR",
+      allotetraploid_logFC <  0 & diploid_logFC >= 0 ~ "TL",
+      allotetraploid_logFC <  0 & diploid_logFC <  0 ~ "BL",
+      TRUE                                           ~ "BR"
+    )
+  ) %>%
+  dplyr::count(quadrant, name = "n") %>%
+  dplyr::mutate(pct = 100 * n / sum(n))
+
+# -----------------------------
+# Label positions
+# -----------------------------
+xlim <- c(-2.1, 2.1)
+ylim <- c(-2.0, 2.0)
+
+label_pos <- tibble::tibble(
+  quadrant = c("TL", "TR", "BL", "BR"),
+  x = c(xlim[1] + 0.12, xlim[2] - 0.12, xlim[1] + 0.12, xlim[2] - 0.12),
+  y = c(ylim[2] - 0.12, ylim[2] - 0.12, ylim[1] + 0.12, ylim[1] + 0.12),
+  hjust = c(0, 1, 0, 1),
+  vjust = c(1, 1, 0, 0)
+)
+
+quad_labels <- label_pos %>%
+  dplyr::left_join(quad_df, by = "quadrant") %>%
+  dplyr::mutate(
+    label = ifelse(is.na(pct), "0%", paste0(sprintf("%.1f", pct), "%"))
+  )
+
+# -----------------------------
+# Shortened y = x segment
+# -----------------------------
+lim <- range(
+  c(plot_df$allotetraploid_logFC, plot_df$diploid_logFC),
+  na.rm = TRUE
+)
+short_lim <- as.numeric(
+  stats::quantile(lim, probs = c(0.1, 0.75), na.rm = TRUE)
+)
+
+
+
+  pad <- 0.15
+  
+  blue_start <- short_lim[1] + pad
+  blue_end   <- short_lim[2] - pad
+  
+  red_bottom <- ylim[1] + pad
+  red_top    <- ylim[2] - pad
+  
+# -----------------------------
+# Plot
+# -----------------------------
+p_effect_size <- ggplot(plot_df,
+                        aes(x = allotetraploid_logFC, y = diploid_logFC)) +
+
+  # grey points
+  geom_point(
+    data = dplyr::filter(plot_df, same_sign != 1),
+    color = "grey75",
+    alpha = 0.8,
+    size = 1
+  ) +
+
+  # black points
+  geom_point(
+    data = dplyr::filter(plot_df, same_sign == 1),
+    color = "black",
+    alpha = 0.7,
+    size = 1
+  ) +
+
+  # quadrant labels
+  geom_label(
+    data = quad_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    hjust = quad_labels$hjust,
+    vjust = quad_labels$vjust,
+    size = 4,
+    label.size = 0.25,
+    fill = "white",
+    color = "black"
+  ) +
+
+  scale_x_continuous(
+    breaks = c(-2, -1, 0, 1, 2),
+    expand = expansion(mult = 0.02)
+  ) +
+  scale_y_continuous(
+    breaks = c(-2, -1, 0, 1, 2),
+    expand = expansion(mult = 0.02)
+  ) +
+
+  coord_equal(xlim = xlim, ylim = ylim, clip = "on") +
+
+  # RED x = 0 vertical line (shortened)
+  geom_segment(
+    aes(
+      x = 0,
+      xend = 0,
+      y = red_bottom,
+      yend = red_top
+    ),
+    inherit.aes = FALSE,
+    color = "red",
+    linewidth = 0.7,
+    arrow = arrow(length = unit(0.18, "cm"), ends = "both", type = "closed")
+  ) +
+
+  # BLUE y = x line (shortened)
+  geom_segment(
+    aes(
+      x = blue_start,
+      y = blue_start,
+      xend = blue_end,
+      yend = blue_end
+    ),
+    inherit.aes = FALSE,
+    color = "blue",
+    linewidth = 0.6,
+    arrow = arrow(length = unit(0.18, "cm"), ends = "both", type = "closed")
+  ) +
+
+  labs(
+    x = "logFC human/chimpanzee in allotetraploid cells",
+    y = "logFC human/chimpanzee"
+  ) +
+  theme_classic() +
+  theme(
+    panel.grid.major = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor = element_line(color = "grey90", linewidth = 0.25),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = element_blank(),
+    axis.title = element_text(size = 10),
+    axis.text  = element_text(size = 8)
+  )
+
+p_effect_size
+#ggsave(paste0(results_path, 'cis_trans_effect_sizes.pdf'), plot = p_effect_size, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+## Cis vs Trans Analysis
+
+### Number of cis/trans DD genes
+
+Number of DD genes for each cell type.The overall category using mean cis proportion of cell types DD.
+```{r}
+# -----------------------------
+# Per-cell-type counts
+# -----------------------------
+celltype_counts <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.cis.category."),
+    names_to = "celltype",
+    values_to = "category"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\."),
+    celltype = stringr::str_replace_all(celltype, "\\.", " "),
+    category = factor(category, levels = c("cis", "neither", "trans", "mixed", "not DD"))
+  ) %>%
+  dplyr::count(celltype, category, .drop = FALSE) %>%
+  tidyr::pivot_wider(
+    names_from = category,
+    values_from = n,
+    values_fill = 0
+  )
+celltype_counts
+
+```
+
+
+
+### Effect size comparisons
+
+We compare the DD effect sizes in diploid cells for all cell types together. These meet our cutoff of > 0.7 as cis and < 0.3 is trans.
+```{r}
+# -------------------------------
+# 1. Cis category → long
+# -------------------------------
+cat_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.cis.category."),
+    names_to = "celltype",
+    values_to = "category"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\.")
+  )
+
+# -------------------------------
+# 2. Effect size → long
+# -------------------------------
+eff_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.logFC.diploid.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.logFC.diploid."),
+    names_to = "celltype",
+    values_to = "effect_size"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.logFC\\.diploid\\.")
+  )
+
+# -------------------------------
+# 3. Combine (gene × cell type instances)
+# -------------------------------
+ecdf_df <- cat_long %>%
+  dplyr::inner_join(eff_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(celltype %in% celltypes) %>%
+  dplyr::filter(!is.na(category)) %>%
+  dplyr::mutate(
+    category = factor(category, levels = c("cis", "neither", "trans"))
+  )
+
+ecdf_df_plot <- ecdf_df %>%
+  dplyr::filter(category %in% c("cis", "trans")) %>%
+  dplyr::mutate(
+    category = factor(category, levels = c("cis", "trans"))
+  )
+
+ecdf_plot <- ggplot2::ggplot(
+  ecdf_df_plot,
+  ggplot2::aes(x = abs(effect_size), color = category)
+) +
+  ggplot2::stat_ecdf(linewidth = 1) +
+  ggplot2::labs(
+    x = "Absolute logFC",
+    y = "Cumulative frequency",
+    color = ""
+  ) +
+  ggplot2::scale_color_manual(
+    values = c(
+      "cis"   = "#009E73",
+      "trans" = "#D55E00"
+    ),
+    labels = c(
+      cis   = expression(italic("cis")),
+      trans = expression(italic("trans"))
+    )
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", linewidth = 1),
+    panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = c(0.9, 0.05),
+    legend.justification = c("right", "bottom"),
+    legend.background = ggplot2::element_rect(
+      fill = scales::alpha("white", 0.7),
+      color = NA
+    ),
+    legend.key = ggplot2::element_blank(),
+    legend.key.height = grid::unit(0.9, "cm"),
+    legend.key.width  = grid::unit(1.2, "cm"),
+    legend.text  = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12)
+  )
+
+ecdf_plot
+#ggsave(paste0(results_path, 'ecdf_cis_trans.pdf'), plot = ecdf_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+We use a K-S test to test for signficant differences in the effect sizes.
+```{r}
+# subset effect sizes
+cis_vals <- ecdf_df_plot %>%
+  dplyr::filter(category == "cis") %>%
+  dplyr::pull(abs(effect_size))
+
+trans_vals <- ecdf_df_plot %>%
+  dplyr::filter(category == "trans") %>%
+  dplyr::pull(abs(effect_size))
+
+# KS test
+ks_res <- ks.test(cis_vals, trans_vals)
+
+ks_res
+
+```
+
+### Mean cis proportion of DD genes
+
+We compare the mean cis proportion of cell types that are DD to the number of times a gene is DD in a cell type. This includes all genes that are DD in the diploid.
+```{r}
+# ----------------------------------
+# Build long dataframe: one row per gene x cell type
+# ----------------------------------
+plot_df_long <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col <- paste0("dd.lfsr.diploid.", ct)
+  cis_col  <- paste0("dd.cis.proportion.", ct)
+
+  dd_results %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      dd_lfsr = .data[[lfsr_col]],
+      cis_prop = .data[[cis_col]]
+    )
+})
+
+# ----------------------------------
+# Keep only diploid-DD gene/celltype pairs
+# ----------------------------------
+plot_df_long_sig <- plot_df_long %>%
+  dplyr::filter(!is.na(dd_lfsr), dd_lfsr < 0.05, !is.na(cis_prop))
+
+# ----------------------------------
+# Collapse to gene-level summary
+# ----------------------------------
+plot_df <- plot_df_long_sig %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(
+    n_ct = dplyr::n(),
+    mean_cis_prop = mean(cis_prop, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    n_ct = factor(n_ct, levels = sort(unique(n_ct)))
+  )
+
+# ----------------------------------
+# Compute p-value (1 vs 5)
+# ----------------------------------
+p_val <- wilcox.test(
+  mean_cis_prop ~ n_ct,
+  data = plot_df %>% dplyr::filter(n_ct %in% c("1", "5"))
+)$p.value
+
+p_label <- paste0(
+  "p < ",
+  round_up_signif(p_val)
+)
+
+# ----------------------------------
+# Bracket positioning
+# ----------------------------------
+y_max <- max(plot_df$mean_cis_prop, na.rm = TRUE)
+h     <- 0.03
+y_pos <- y_max + 0.055
+
+# ----------------------------------
+# Plot
+# ----------------------------------
+p_mean_cis_diploid <- ggpubr::ggboxplot(
+  plot_df,
+  x = "n_ct",
+  y = "mean_cis_prop",
+  fill = "n_ct",
+  color = "black",
+  palette = "Set2",
+  add = "jitter",
+  add.params = list(width = 0.15, alpha = 0.5, size = 1)
+) +
+  annotate("segment", x = 1, xend = 5, y = y_pos, yend = y_pos) +
+  annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = 5, xend = 5, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = 3, y = y_pos + h, label = p_label, size = 4) +
+  labs(
+    x = "Number of cell types DD in diploid",
+    y = expression(paste("Mean ", italic("cis"), " proportion"))
+  ) +
+  ggpubr::theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.line = element_blank(),
+    plot.margin = margin(5.5, 20, 5.5, 5.5)
+  ) +
+  coord_cartesian(
+    ylim = c(0, y_pos + 0.05),
+    clip = "off"
+  )
+
+p_mean_cis_diploid
+#ggsave(paste0(results_path, 'mean_cis_by_n_celltype_dd.pdf'), plot = p_mean_cis_diploid, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+### LOEUF
+
+Load LOF data.
+```{r}
+# Load data to get LOF scores
+path_lof <- '/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/evo_constraint/'
+lof_scores <- read.table(paste0(path_lof,'gnomad.v4.1.constraint_metrics.tsv'), header = TRUE)
+lof_scores <- lof_scores %>% filter(mane_select == "true")
+```
+
+We compare the loss of function in cis and trans genes. We use our overall definition of cis/trans genes by looking at mean cis proportion of cell type DD and determine cis (>0.7) or trans (<0.3).
+```{r}
+###### Plot
+plot_df2 <- dd_results %>%
+  dplyr::select(gene, dd.cis.category.overall) %>%
+  dplyr::inner_join(
+    lof_scores %>%
+      dplyr::select(gene, lof.oe),
+    by = "gene"
+  ) %>%
+  dplyr::mutate(
+    cat = factor(
+      as.character(dd.cis.category.overall),
+      levels = c("cis", "neither", "mixed", "trans", "not DD")
+    )
+  )
+
+# Wilcoxon: cis vs trans
+pval <- plot_df2 %>%
+  dplyr::filter(cat %in% c("cis", "trans")) %>%
+  dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
+  dplyr::pull(p)
+
+if (pval < 2e-16) {
+  p_label <- "p < 2e-16"
+} else {
+  p_up <- round_up_signif(pval, digits = 1)
+  p_label <- paste0(
+    "p < ",
+    round_up_signif(pval)
+  )
+}
+
+y_pos <- min(1.65, max(plot_df2$lof.oe, na.rm = TRUE) * 1.12)
+h <- 0.05
+
+p_lof <- ggplot(plot_df2, aes(x = cat, y = lof.oe, fill = cat)) +
+  geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+  # bracket spanning cis (1) to trans (4)
+  annotate("segment", x = 1, xend = 4, y = y_pos, yend = y_pos) +
+  annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = 4, xend = 4, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = 2.5, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+
+  scale_fill_manual(values = c(
+    "cis"     = "#009E73",
+    "trans"   = "#D55E00",
+    "neither" = "#0072B2",
+    "mixed"   = "#CC79A7",
+    "not DD"  = "grey70"
+  )) +
+  labs(x = "", y = "LOEUF") +
+  ggpubr::theme_pubr() +
+  theme(
+    axis.line = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none",
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(0, 1.7)) +
+  scale_x_discrete(labels = c(
+    "cis"     = expression(italic("cis")),
+    "trans"   = expression(italic("trans")),
+    "neither" = "neither",
+    "mixed"   = "mixed",
+    "not DD"  = "not DD"
+  ))
+
+p_lof
+#ggsave(paste0(results_path, 'lof_cis_trans.pdf'), plot = p_lof, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+
+#### Supplementary varying cis/trans cutoff
+
+Supplementary using mean cis proportion of cell types DD.
+```{r}
+lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
+
+  plot_df2 <- dd_results %>%
+    dplyr::select(gene, dd.recapitulated.mean.cis.proportion) %>%
+    dplyr::mutate(
+      combined_category = dplyr::case_when(
+        is.na(dd.recapitulated.mean.cis.proportion) ~ "not DD",
+        dd.recapitulated.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.recapitulated.mean.cis.proportion < trans_cutoff ~ "trans",
+        TRUE                                                ~ "neither"
+      )
+    ) %>%
+    dplyr::inner_join(
+      lof_scores %>%
+        dplyr::select(gene, lof.oe),
+      by = "gene"
+    ) %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans", "not DD")
+      )
+    )
+
+  # Wilcoxon: cis vs trans
+  pval <- plot_df2 %>%
+  dplyr::filter(cat %in% c("cis", "trans")) %>%
+  dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
+  dplyr::pull(p)
+
+  p_label <- paste0(
+    "p < ",
+    round_up_signif(pval)
+  )
+
+  y_pos <- min(1.75, max(plot_df2$lof.oe, na.rm = TRUE) * 1.12)
+  h <- 0.05
+
+p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
+  ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+  # bracket spanning cis (1) to trans (3)
+  ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+  ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+  ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+
+  ggplot2::scale_fill_manual(values = c(
+    "cis"     = "#009E73",
+    "trans"   = "#D55E00",
+    "neither" = "#0072B2",
+    "not DD"  = "grey70"
+  )) +
+  ggplot2::labs(x = "", y = "LOEUF") +
+  ggpubr::theme_pubr() +
+  ggplot2::theme(
+    axis.line = ggplot2::element_blank(),
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor.y = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_blank(),
+    panel.grid.minor.x = ggplot2::element_blank(),
+    legend.position = "none",
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text = ggplot2::element_text(size = 12)
+  ) +
+  ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
+  ggplot2::scale_x_discrete(labels = c(
+    "cis"     = expression(italic("cis")),
+    "trans"   = expression(italic("trans")),
+    "neither" = "neither",
+    "not DD"  = "not DD"
+  ))
+
+  # add p-value label conditionally
+  if (pval >= 1e-4) {
+    p_lof <- p_lof +
+      ggplot2::annotate(
+        "text",
+        x = 2,
+        y = y_pos + h,
+        label = p_label,
+        size = 4
+      )
+  } else {
+    p_lof <- p_lof +
+      ggplot2::annotate(
+        "text",
+        x = 2,
+        y = y_pos + h,
+        label = p_label,
+        size = 4,
+        parse = TRUE
+      )
+  }
+
+return(p_lof)
+}
+```
+
+```{r}
+p_0.6_0.4lof <-lof_cutoff(dd_results,lof_scores,0.6,0.4)
+p_0.65_0.35lof <-lof_cutoff(dd_results,lof_scores,0.65,0.35)
+p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,0.7,0.3)
+p_0.75_0.25lof <-lof_cutoff(dd_results,lof_scores,0.75,0.25)
+p_0.8_0.2lof <-lof_cutoff(dd_results,lof_scores,0.8,0.2)
+p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,0.85,0.15)
+
+#p_0.6_0.4lof + p_0.65_0.35lof + p_0.7_0.3lof + p_0.75_0.25lof + p_0.8_0.2lof + p_0.85_0.15lof
+```
+
+Supplementary using mixed defintion.
+```{r}
+lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
+
+  dd_results2 <- dd_results %>%
+    dplyr::mutate(
+      dplyr::across(
+        starts_with("dd.cis.proportion."),
+        ~ {
+          ct <- sub("^dd\\.cis\\.proportion\\.", "", dplyr::cur_column())
+          dd_col <- paste0("dd.recapitulated.same.sign.", ct)
+
+          if (!dd_col %in% names(dd_results)) {
+            return(rep("not DD", length(.x)))
+          }
+
+          dd_flag <- dd_results[[dd_col]]
+
+          out <- rep("not DD", length(.x))
+          is_dd <- !is.na(dd_flag) & dd_flag == 1
+
+          out[is_dd & .x > cis_cutoff] <- "cis"
+          out[is_dd & .x < trans_cutoff] <- "trans"
+          out[is_dd & .x >= trans_cutoff & .x <= cis_cutoff] <- "neither"
+
+          out
+        },
+        .names = "dd.cis.category.{sub('^dd\\\\.cis\\\\.proportion\\\\.', '', .col)}"
+      )
+    )
+
+  cat_cols <- names(dd_results2)[startsWith(names(dd_results2), "dd.cis.category.")]
+
+  gene_category_df <- dd_results2 %>%
+    dplyr::select(gene, dplyr::all_of(cat_cols)) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      has_cis = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "cis", na.rm = TRUE),
+      has_trans = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "trans", na.rm = TRUE),
+      has_neither = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "neither", na.rm = TRUE),
+      combined_category = dplyr::case_when(
+        has_cis & has_trans ~ "mixed",
+        has_cis ~ "cis",
+        has_trans ~ "trans",
+        has_neither ~ "neither",
+        TRUE ~ "not DD"
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(gene, combined_category)
+
+  plot_df2 <- gene_category_df %>%
+    dplyr::inner_join(
+      lof_scores %>%
+        dplyr::select(gene, lof.oe),
+      by = "gene"
+    ) %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans","mixed", "not DD")
+      )
+    )
+
+  # Wilcoxon: cis vs trans
+  pval <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
+    dplyr::pull(p)
+
+   p_label <- paste0(
+    "p < ",
+    round_up_signif(pval)
+  )
+
+  y_pos <- min(1.75, max(plot_df2$lof.oe, na.rm = TRUE) * 1.12)
+  h <- 0.05
+
+  p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    # bracket spanning cis (1) to trans (3)
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "neither" = "#0072B2",
+      "trans"   = "#D55E00",
+      "mixed"   = "#CC79A7",
+      "not DD"  = "grey70"
+    )) +
+    ggplot2::labs(x = "", y = "LOEUF") +
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
+    ggplot2::scale_x_discrete(labels = c(
+      "cis"     = expression(italic("cis")),
+      "neither" = "neither",
+      "trans"   = expression(italic("trans")),
+      "mixed"   = "mixed",
+      "not DD"  = "not DD"
+    ))
+    # add p-value label conditionally
+    if (pval >= 1e-4) {
+      p_lof <- p_lof +
+        ggplot2::annotate(
+          "text",
+          x = 2,
+          y = y_pos + h,
+          label = p_label,
+          size = 4
+        )
+    } else {
+      p_lof <- p_lof +
+        ggplot2::annotate(
+          "text",
+          x = 2,
+          y = y_pos + h,
+          label = p_label,
+          size = 4,
+          parse = TRUE
+        )
+    }
+
+
+  return(p_lof)
+}
+```
+
+```{r}
+p_0.6_0.4lof <-lof_cutoff(dd_results,lof_scores,0.6,0.4)
+p_0.65_0.35lof <-lof_cutoff(dd_results,lof_scores,0.65,0.35)
+p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,0.7,0.3)
+p_0.75_0.25lof <-lof_cutoff(dd_results,lof_scores,0.75,0.25)
+p_0.8_0.2lof <-lof_cutoff(dd_results,lof_scores,0.8,0.2)
+p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,0.85,0.15)
+
+# p_0.6_0.4lof + p_0.65_0.35lof + p_0.7_0.3lof + p_0.75_0.25lof + p_0.8_0.2lof + p_0.85_0.15lof
+```
+
+
+
+### dN/dS
+
+Load table with dN/dS ratios.
+```{r}
+# load data table
+dn.ds <- read.table( gzfile("/project2/gilad/kenneth/References/Overall_dN_dS.bed.gz"), header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+```
+
+```{r}
+plot_df <- dd_results %>%
+  dplyr::select(gene, dd.cis.category.overall) %>%
+  dplyr::left_join(
+    dn.ds %>%
+      dplyr::select(V4, V11) %>%
+      dplyr::rename(dn.ds = V11) %>%
+      dplyr::mutate(dn.ds = as.numeric(dn.ds)),
+    by = c("gene" = "V4")
+  )
+
+plot_df2 <- plot_df %>%
+  dplyr::mutate(
+    cat = factor(
+      as.character(dd.cis.category.overall),
+      levels = c("cis", "neither","mixed", "trans", "not DD")
+    )
+  ) %>%
+  dplyr::filter(!is.na(dn.ds), is.finite(dn.ds))
+
+# cis vs trans only for significance
+cis_trans <- plot_df2 %>%
+  dplyr::filter(cat %in% c("cis", "trans"))
+
+pval <- wilcox.test(dn.ds ~ cat, data = cis_trans)$p.value
+p_label <- paste0("p = ", format.pval(pval, digits = 2, eps = 1e-300))
+
+# ---- set y-limits for dn/ds panel ----
+ymin <- 0
+ymax <- 0.6
+
+# ---- bracket positions INSIDE the panel ----
+y_pos <- min(ymax - 0.01, max(plot_df2$dn.ds, na.rm = TRUE) * 1.1)
+h     <- 0.02
+
+p <- ggplot(plot_df2, aes(x = cat, y = dn.ds, fill = cat)) +
+  geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+  # significance bracket inside plot box
+  annotate("segment", x = 1, xend = 4, y = y_pos, yend = y_pos) +
+  annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = 4, xend = 4, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = 2.5, y = y_pos + h, label = p_label, size = 4) +
+
+  scale_fill_manual(values = c(
+    "cis"     = "#009E73",
+    "trans"   = "#D55E00",
+    "neither" = "#0072B2",
+    "mixed"   = "#CC79A7",
+    "not DD"  = "grey70"
+  )) +
+  labs(x = "", y = "dN/dS") +
+ ggpubr::theme_pubr()+
+  theme(
+    axis.line = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 1, fill = NA),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none",
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  scale_x_discrete(labels = c(
+    cis      = expression(italic("cis")),
+    trans    = expression(italic("trans")),
+    neither  = "neither",
+    mixed = "mixed",
+    `not DD` = "not DD"
+  ))
+
+p
+#ggsave(paste0(results_path, 'dnds_cis_trans.pdf'), plot = p, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### Supplementary varying cis/trans cutoff
+
+Using mean definition for cis and trans genes.
+```{r}
+dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
+
+  plot_df <- dd_results %>%
+    dplyr::select(gene, dd.recapitulated.mean.cis.proportion) %>%
+    dplyr::mutate(
+      combined_category = dplyr::case_when(
+        is.na(dd.recapitulated.mean.cis.proportion) ~ "not DD",
+        dd.recapitulated.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.recapitulated.mean.cis.proportion < trans_cutoff ~ "trans",
+        TRUE                                                ~ "neither"
+      )
+    ) %>%
+    dplyr::left_join(
+      dn.ds %>%
+        dplyr::select(V4, V11) %>%
+        dplyr::rename(dn.ds = V11),
+      by = c("gene" = "V4")
+    )
+
+  plot_df2 <- plot_df %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans", "not DD")
+      ),
+      dn.ds = as.numeric(dn.ds)
+    ) %>%
+    dplyr::filter(!is.na(dn.ds), is.finite(dn.ds))
+
+  # cis vs trans only for significance
+  cis_trans <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans"))
+
+  pval <- wilcox.test(dn.ds ~ cat, data = cis_trans)$p.value
+  p_label <- paste0("p = ", format.pval(pval, digits = 2, eps = 1e-300))
+
+  ymin <- 0
+  ymax <- 0.7
+
+  y_pos <- min(ymax - 0.03, max(plot_df2$dn.ds, na.rm = TRUE) * 1.1)
+  h <- 0.02
+
+  p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = dn.ds, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4) +
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "neither" = "#0072B2",
+      "trans"   = "#D55E00",
+      "not DD"  = "grey70"
+    )) +
+    ggplot2::labs(x = "", y = "dN/dS") +
+
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", linewidth = 1, fill = NA),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text  = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
+    ggplot2::scale_x_discrete(labels = c(
+      cis      = expression(italic("cis")),
+      neither  = "neither",
+      trans    = expression(italic("trans")),
+      `not DD` = "not DD"
+    ))
+
+  return(p)
+}
+```
+
+
+```{r}
+p_0.6_0.4dnds <-dn_ds_cutoff(dd_results,dn.ds,0.6,0.4)
+p_0.65_0.35dnds <-dn_ds_cutoff(dd_results,dn.ds,0.65,0.35)
+p_0.7_0.3dnds <-dn_ds_cutoff(dd_results,dn.ds,0.7,0.3)
+p_0.75_0.25dnds <-dn_ds_cutoff(dd_results,dn.ds,0.75,0.25)
+p_0.8_0.2dnds <-dn_ds_cutoff(dd_results,dn.ds,0.8,0.2)
+p_0.85_0.15dnds <-dn_ds_cutoff(dd_results,dn.ds,0.85,0.15)
+
+#p_0.6_0.4dnds + p_0.65_0.35dnds + p_0.7_0.3dnds + p_0.75_0.25dnds + p_0.8_0.2dnds + p_0.85_0.15dnds
+```
+
+
+
+Using the mixed definition for cis and trans genes.
+```{r}
+dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
+
+  dd_results2 <- dd_results %>%
+    dplyr::mutate(
+      across(
+        starts_with("dd.cis.proportion."),
+        ~ dplyr::case_when(
+          .x > cis_cutoff   ~ "cis",
+          .x < trans_cutoff ~ "trans",
+          TRUE              ~ "neither"
+        ),
+        .names = "dd.cis.category.{sub('^dd\\\\.cis\\\\.proportion\\\\.', '', .col)}"
+      )
+    )
+
+  dd_results2 <- dd_results2 %>%
+    dplyr::mutate(
+      across(
+        starts_with("dd.cis.proportion."),
+        ~ {
+          ct <- sub("^dd\\.cis\\.proportion\\.", "", dplyr::cur_column())
+          dd_col <- paste0("dd.recapitulated.same.sign.", ct)
+
+          if (!dd_col %in% names(dd_results2)) {
+            return(rep("not DD", length(.x)))
+          }
+
+          dd_flag <- dd_results2[[dd_col]]
+
+          out <- rep("not DD", length(.x))
+          is_dd <- !is.na(dd_flag) & dd_flag == 1
+
+          out[is_dd & .x > cis_cutoff] <- "cis"
+          out[is_dd & .x < trans_cutoff] <- "trans"
+          out[is_dd & .x >= trans_cutoff & .x <= cis_cutoff] <- "neither"
+
+          out
+        },
+        .names = "dd.cis.category.{sub('^dd\\\\.cis\\\\.proportion\\\\.', '', .col)}"
+      )
+    )
+
+  # get all cis-category columns
+  cat_cols <- names(dd_results2)[startsWith(names(dd_results2), "dd.cis.category.")]
+
+  gene_category_df <- dd_results2 %>%
+    dplyr::select(gene, all_of(cat_cols)) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      has_cis = any(dplyr::c_across(all_of(cat_cols)) == "cis", na.rm = TRUE),
+      has_trans = any(dplyr::c_across(all_of(cat_cols)) == "trans", na.rm = TRUE),
+      has_neither = any(dplyr::c_across(all_of(cat_cols)) == "neither", na.rm = TRUE),
+      combined_category = dplyr::case_when(
+        has_cis & has_trans ~ "mixed",
+        has_cis ~ "cis",
+        has_trans ~ "trans",
+        has_neither ~ "neither",
+        TRUE ~ "not DD"
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(gene, combined_category)
+
+  plot_df <- gene_category_df %>%
+    dplyr::left_join(
+      dn.ds %>%
+        dplyr::select(V4, V11) %>%
+        dplyr::rename(dn.ds = V11),
+      by = c("gene" = "V4")
+    )
+
+  plot_df2 <- plot_df %>%
+    dplyr::mutate(
+      cat = factor(combined_category, levels = c("cis", "neither", "trans", "mixed", "not DD")),
+      dn.ds = as.numeric(dn.ds)
+    ) %>%
+    dplyr::filter(!is.na(dn.ds), is.finite(dn.ds))
+
+  # cis vs trans only for significance
+  cis_trans <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans"))
+
+  pval <- wilcox.test(dn.ds ~ cat, data = cis_trans)$p.value
+  p_label <- paste0("p = ", format.pval(pval, digits = 2, eps = 1e-300))
+
+  ymin <- 0
+  ymax <- 0.6
+
+  y_pos <- min(ymax - 0.03, max(plot_df2$dn.ds, na.rm = TRUE) * 1.1)
+  h <- 0.02
+
+  p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = dn.ds, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4) +
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "neither" = "#0072B2",
+      "trans"   = "#D55E00",
+      "mixed"   = "#CC79A7",
+      "not DD"  = "grey70"
+    )) +
+    ggplot2::labs(x = "", y = "dN/dS") +
+
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", linewidth = 1, fill = NA),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text  = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
+    ggplot2::scale_x_discrete(labels = c(
+      cis      = expression(italic("cis")),
+      neither  = "neither",
+      trans    = expression(italic("trans")),
+      mixed    = "mixed",
+      `not DD` = "not DD"
+    ))
+
+  return(p)
+}
+```
+
+```{r}
+p_0.6_0.4dnds <-dn_ds_cutoff(dd_results,dn.ds,0.6,0.4)
+p_0.65_0.35dnds <-dn_ds_cutoff(dd_results,dn.ds,0.65,0.35)
+p_0.7_0.3dnds <-dn_ds_cutoff(dd_results,dn.ds,0.7,0.3)
+p_0.75_0.25dnds <-dn_ds_cutoff(dd_results,dn.ds,0.75,0.25)
+p_0.8_0.2dnds <-dn_ds_cutoff(dd_results,dn.ds,0.8,0.2)
+p_0.85_0.15dnds <-dn_ds_cutoff(dd_results,dn.ds,0.85,0.15)
+
+# p_0.6_0.4dnds + p_0.65_0.35dnds + p_0.7_0.3dnds + p_0.75_0.25dnds + p_0.8_0.2dnds + p_0.85_0.15dnds
+```
+
+```{r}
+
+```
+
+
+### Supplementary: Determining cis/trans cutoffs
+
+#### Number of DD Genes
+
+Using cis cutoffs.
+```{r}
+celltypes <- c("ENS.glia", "Glioblast", "Neuroblast", "Neuronal.IPC", "Radial.glia")
+cutoffs   <- seq(0.5, 1, by = 0.1)
+
+# ----------------------------------------------
+# 2. Wide → long for cis proportion
+#    dd.cis.proportion.<celltype>
+# ----------------------------------------------
+cis_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.proportion.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.cis.proportion."),
+    names_to  = "celltype",
+    values_to = "cis_prop"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.cis\\.proportion\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 3. Wide → long for recapitulated same-sign flag
+#    dd.recapitulated.same.sign.<celltype>
+# ----------------------------------------------
+recap_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.recapitulated.same.sign.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.recapitulated.same.sign."),
+    names_to  = "celltype",
+    values_to = "recap_same_sign"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.recapitulated\\.same\\.sign\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 4. Merge and filter to recapitulated same-sign genes only
+# ----------------------------------------------
+df_recap <- cis_long %>%
+  dplyr::inner_join(recap_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(celltype %in% celltypes, recap_same_sign == 1)
+
+# ----------------------------------------------
+# 5. Count cis genes passing each cutoff by cell type
+#    condition: cis_prop >= cutoff
+# ----------------------------------------------
+summary_plot_recap <- tidyr::expand_grid(
+  celltype = celltypes,
+  cutoff   = cutoffs
+) %>%
+  dplyr::left_join(df_recap, by = "celltype") %>%
+  dplyr::group_by(celltype, cutoff) %>%
+  dplyr::summarise(
+    n_cis_genes = sum(cis_prop >= cutoff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------------------
+# 6. Plot
+# ----------------------------------------------
+p_cis_cutoff_genes <- ggplot2::ggplot(
+  summary_plot_recap,
+  ggplot2::aes(x = cutoff, y = n_cis_genes, color = celltype)
+) +
+  ggplot2::geom_line(linewidth = 1.2) +
+  ggplot2::geom_point(size = 3) +
+  ggplot2::coord_cartesian(ylim = c(0, 120)) +
+  ggplot2::scale_y_continuous(breaks = c(0,20,40,60,80,100,120)) +
+  ggplot2::scale_x_continuous(breaks = cutoffs, limits = c(0.5, 1)) +
+  ggplot2::labs(
+    x = expression(italic("cis") ~ "proportion"),
+    y = expression("#" ~ italic("cis") ~ "DD genes"),
+    color = "Cell Type"
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill  = NA,
+      linewidth = 1
+    ),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12)
+  )
+
+p_cis_cutoff_genes
+#ggsave(paste0(results_path, 'supplement/cis_cutoff_num_dd_genes.pdf'), plot = p_cis_cutoff_genes, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+Using trans cutoffs.
+```{r}
+cutoffs_trans <- seq(0, 0.5, by = 0.1)
+
+# ----------------------------------------------
+# 2. Wide → long for cis proportion
+#    dd.cis.proportion.<celltype>
+# ----------------------------------------------
+cis_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.proportion.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.cis.proportion."),
+    names_to  = "celltype",
+    values_to = "cis_prop"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.cis\\.proportion\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 3. Wide → long for recapitulated same-sign flag
+#    dd.recapitulated.same.sign.<celltype>
+# ----------------------------------------------
+recap_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.recapitulated.same.sign.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.recapitulated.same.sign."),
+    names_to  = "celltype",
+    values_to = "recap_same_sign"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.recapitulated\\.same\\.sign\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 4. Merge and filter to recapitulated same-sign genes only
+# ----------------------------------------------
+df_recap <- cis_long %>%
+  dplyr::inner_join(recap_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(celltype %in% celltypes, recap_same_sign == 1)
+
+# ----------------------------------------------
+# 5. Count trans genes at each cutoff by cell type
+#    Define trans as: cis_prop <= cutoff
+# ----------------------------------------------
+summary_plot_trans <- tidyr::expand_grid(
+  celltype = celltypes,
+  cutoff   = cutoffs_trans
+) %>%
+  dplyr::left_join(df_recap, by = "celltype") %>%
+  dplyr::group_by(celltype, cutoff) %>%
+  dplyr::summarise(
+    n_trans_genes = sum(cis_prop <= cutoff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------------------
+# 6. Plot
+# ----------------------------------------------
+p_trans_cutoff_genes <- ggplot2::ggplot(
+  summary_plot_trans,
+  ggplot2::aes(x = cutoff, y = n_trans_genes, color = celltype)
+) +
+  ggplot2::geom_line(linewidth = 1.2) +
+  ggplot2::geom_point(size = 3) +
+  ggplot2::coord_cartesian(ylim = c(0, 120)) +
+  ggplot2::scale_y_continuous(breaks = c(0,20,40,60,80,100,120)) +
+  ggplot2::scale_x_continuous(breaks = cutoffs_trans, limits = c(0, 0.5)) +
+  ggplot2::scale_color_discrete(
+    labels = function(x) gsub("\\.", " ", x)
+  ) +
+  ggplot2::labs(
+    x = expression(italic("cis") ~ "proportion"),
+    y = expression("#" ~ italic("trans") ~ "DD genes"),
+    title = "",
+    color = "Cell Type"
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill  = NA,
+      linewidth = 1
+    ),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12)
+  )
+
+p_trans_cutoff_genes
+#ggsave(paste0(results_path, 'supplement/trans_cutoff_num_dd_genes.pdf'), plot = p_trans_cutoff_genes, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### DD genes that exist in multiple cell types
+
+
+Using cis cutoffs.
+```{r}
+N_ct <- length(celltypes)
+
+# For each cutoff, count how many cell types each gene is cis-like in
+# (defined as dd.cis.proportion >= cutoff among recapitulated same-sign genes)
+gene_ct_counts_cis_recap <- df_recap %>%
+  dplyr::filter(celltype %in% celltypes) %>%
+  tidyr::expand_grid(cutoff = cutoffs) %>%
+  dplyr::filter(cis_prop >= cutoff) %>%
+  dplyr::distinct(gene, celltype, cutoff) %>%
+  dplyr::count(cutoff, gene, name = "n_celltypes_cis")
+
+# Histogram: number of genes by exact number of cell types (exclude 0)
+plot_df_cis_recap <- gene_ct_counts_cis_recap %>%
+  dplyr::filter(n_celltypes_cis >= 1) %>%
+  dplyr::count(cutoff, n_celltypes_cis, name = "n_genes") %>%
+  tidyr::complete(
+    cutoff,
+    n_celltypes_cis = 1:N_ct,
+    fill = list(n_genes = 0)
+  ) %>%
+  dplyr::mutate(
+    n_celltypes_cis = factor(n_celltypes_cis, levels = 1:N_ct),
+    cutoff = factor(cutoff, levels = sort(unique(cutoffs)))
+  )
+
+# Plot
+p_cis_dd_celltypes <- ggplot2::ggplot(
+  plot_df_cis_recap,
+  ggplot2::aes(x = n_celltypes_cis, y = n_genes)
+) +
+  ggplot2::geom_col(fill = "#619CFF") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n_genes),
+    vjust = -0.3,
+    size = 3
+  ) +
+  ggplot2::facet_wrap(~ cutoff, ncol = 3) +
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.1))
+  ) +
+  ggplot2::labs(
+    x = expression("# cell types where" ~ italic("cis") ~ "DD genes exist"),
+    y = "# DD genes",
+    title = ""
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    axis.line = ggplot2::element_blank(),
+    strip.background = ggplot2::element_rect(
+      fill = "grey88",
+      color = "black",
+      linewidth = 0.5
+    ),
+    strip.text = ggplot2::element_text(face = "bold"),
+    axis.ticks = ggplot2::element_line(color = "black", linewidth = 0.3)
+  )
+
+p_cis_dd_celltypes
+#ggsave(paste0(results_path, 'supplement/cis_cutoff_num_dd_genes_per_celltype.pdf'), plot = p_cis_dd_celltypes, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+Using trans cutoffs.
+```{r}
+# For each cutoff, count how many cell types each gene is trans-like in
+# (defined as dd.cis.proportion <= cutoff among recapitulated same-sign genes)
+gene_ct_counts_trans_recap <- df_recap %>%
+  dplyr::filter(celltype %in% celltypes) %>%
+  tidyr::expand_grid(cutoff = cutoffs_trans) %>%
+  dplyr::filter(cis_prop <= cutoff) %>%
+  dplyr::distinct(gene, celltype, cutoff) %>%
+  dplyr::count(cutoff, gene, name = "n_celltypes_trans")
+
+# Histogram: number of genes by exact number of cell types (exclude 0)
+plot_df_trans_recap <- gene_ct_counts_trans_recap %>%
+  dplyr::filter(n_celltypes_trans >= 1) %>%
+  dplyr::count(cutoff, n_celltypes_trans, name = "n_genes") %>%
+  tidyr::complete(
+    cutoff,
+    n_celltypes_trans = 1:N_ct,
+    fill = list(n_genes = 0)
+  ) %>%
+  dplyr::mutate(
+    n_celltypes_trans = factor(n_celltypes_trans, levels = 1:N_ct),
+    cutoff = factor(cutoff, levels = sort(unique(cutoffs_trans)))
+  )
+
+# Plot
+p_trans_cutoff_celltype <- ggplot2::ggplot(
+  plot_df_trans_recap,
+  ggplot2::aes(x = n_celltypes_trans, y = n_genes)
+) +
+  ggplot2::geom_col(fill = "#619CFF") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n_genes),
+    vjust = -0.3,
+    size = 3
+  ) +
+  ggplot2::facet_wrap(~ cutoff, ncol = 3) +
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.1))
+  ) +
+  ggplot2::labs(
+    x = expression("# cell types where" ~ italic("trans") ~ "DD genes exist"),
+    y = "# DD genes",
+    title = ""
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    axis.line = ggplot2::element_blank(),
+    strip.background = ggplot2::element_rect(
+      fill = "grey88",
+      color = "black",
+      linewidth = 0.5
+    ),
+    strip.text = ggplot2::element_text(face = "bold"),
+    axis.ticks = ggplot2::element_line(color = "black", linewidth = 0.3)
+  )
+
+p_trans_cutoff_celltype
+#ggsave(paste0(results_path, 'supplement/trans_cutoff_num_dd_genes_per_celltype.pdf'), plot = p_trans_cutoff_celltype, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+## Supplementary: Cell Counts
+```{r}
+path <- '/project/gilad/awchen55/differentialDispersion/data/crossfilt_clustered_data/cell_annotations/'
+cell_annotations <- read.csv(paste0(path,'barr_crossfilt_cell_annotations.csv'))
+
+# cell types you want to keep
+celltypes_keep <- c(
+  "Neuroblast",
+  "ENS glia",
+  "Radial glia",
+  "Neuronal IPC",
+  "Glioblast"
+)
+
+plot_df <- cell_annotations %>%
+  mutate(
+    species = case_when(
+      str_starts(cell_barcode, "hhy") ~ "Allotetraploid",
+      str_starts(cell_barcode, "chy") ~ "Allotetraploid",
+      str_starts(cell_barcode, "h")   ~ "Human",
+      str_starts(cell_barcode, "c")   ~ "Chimpanzee",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(
+    celltype %in% celltypes_keep,
+    !is.na(species)
+  ) %>%
+  dplyr::count(celltype, species, name = "cell_count") %>%
+  mutate(
+    celltype = factor(celltype, levels = celltypes_keep),
+    species = factor(species, levels = c("Human", "Chimpanzee", "Allotetraploid"))
+  )
+
+y_max <- max(plot_df$cell_count, na.rm = TRUE)
+
+dodge <- position_dodge(width = 0.9)
+
+p_cell_counts <- ggplot(plot_df, aes(x = celltype, y = cell_count, fill = species)) +
+  geom_col(
+    position = dodge,
+    width = 0.75,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_text(
+    aes(label = scales::comma(cell_count)),
+    position = dodge,
+    vjust = -0.25,
+    size = 3
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Human" = "#D55E00",
+      "Chimpanzee" = "#0072B2",
+      "Allotetraploid" = "#009E73"
+    )
+  ) +
+  scale_y_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    x = "",
+    y = "Number of cells",
+    fill = ""
+  ) +
+  coord_cartesian(ylim = c(0, 40000), clip = "off") +
+  theme_classic(base_size = 12) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    legend.position = "top",
+    plot.margin = margin(10,10,10,10)
+  )
+
+p_cell_counts
+#ggsave(paste0(results_path, 'supplement/cellcounts.pdf'), plot = p_cell_counts, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+## Supplementary: Simulation
+```{r}
+
+```
+
+
