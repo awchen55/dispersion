@@ -1,0 +1,460 @@
+---
+title: "Simulation scRNA-seq"
+output: html_document
+date: "2026-03-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The simulation framework is designed to simulate scRNA-seq data using a Gamma-Poisson distribution. It has the flexibility to alter dispersion levels.
+
+# **Simulation Details**
+
+We simulate a matrix $Y \in \mathbb{R}^{n\times p}$ that contains raw expression values (scRNA-seq counts) for $p$ genes and $n$ single cells. We set $\pi$ as the percent of genes that are overdispersed. We use a Gamma-Poisson model for each gene and can set the dispersion level for each simulated gene.
+
+```{r, eval=F,include=F}
+## **Poisson Distribution**
+
+### ***Model***
+
+We first simulate a Poisson distribution as our null model for each gene, where there is no dispersion parameter.
+
+$$
+y_{ij} \sim Pois(L_i\lambda_j) 
+$$
+
+Where the variables for cell $i$ and gene $j$ are:
+
+-   $y_{ij}$ is the number of unique molecular identifier (UMI) for cell $i$ and gene $j$
+
+-   $L_i$ is the library size of cell $i$
+
+-   $\lambda_j$ is the relative expression value of gene $j$
+
+### ***Density Function***
+
+The density function for the Poisson distribution is:
+
+$$
+f(y;\lambda) = \frac{\lambda^y e^{-\lambda}}{y!}
+$$
+
+Where for $y =0,1,2,...$ the $E[Y] = Var[Y] = \lambda$.
+
+### ***Simulation Parameters***
+
+We use the **rpois(**$n$, $\lambda$) function in R to simulate the Poisson distribution. The library size and relative expression values are calculated from a real data set (human-chimp hybrid data). Each $Y$ is calculated for cells from the same species, cell type, and replicate. We simulate for $n=500$ cells.
+```
+
+## **Gamma-Poisson (NB) Distribution**
+
+### ***Model***
+
+We simulate the Negative Binomial distribution using the Gamma-Poisson distribution, since the Gamma distribution is a conjugate prior of the Poisson distribution. The mean is fixed for each bin of mean expression. The dispersion parameter differs from the background versus the dispersed gene. Under this model,
+
+$$
+y_{ij} \sim Pois(L_i \lambda_{ij})
+$$
+
+$$
+\lambda_{ij} \sim \begin{equation}
+  f_j(\cdot) =
+    \begin{cases}
+      Gamma(\mu_{j},\phi_{j_0}) & \text{for background gene} \\
+      Gamma(\mu_j,\phi_j) & \text{for overdispersed gene} \\
+    \end{cases}       
+\end{equation}
+$$
+
+Where the variables for cell $i$ and gene $j$ are:
+
+-   $y_{ij}$ is the number of unique molecular identifier (UMI) for cell $i$ and gene $j$
+
+-   $L_i$ is the library size of cell $i$
+
+-   $\lambda_{ij}$ is the latent expression value of gene $j$
+
+-   $\mu_j$ is the mean relative expression value of $\lambda_{ij}$ for gene $j$
+
+-   $\phi_j$ is the dispersion value of $\lambda_{ij}$ for gene $j$
+
+-   $\phi_{j_0}$ is the null dispersion value for a background gene
+
+### ***Density Function***
+
+The density function for the Gamma distribution is:
+
+$$
+f(y; \mu,\phi) = \frac{(\phi^{-1}\mu^{-1})^{\phi^{-1}}}{\Gamma(\phi^{-1})} y^{\phi^{-1}-1} e^{\phi^{-1}\mu^{-1}y}
+$$
+
+Where for $y =0,1,2,...$ the $E[Y] = \mu$ and $Var[Y] = \mu^2 \phi$.
+
+### ***Simulation Parameters***
+
+We will first simulate $\lambda_j$ using the **rgamma(**$n$,$\alpha$,$\sigma$) function in R with mean $\alpha\sigma$ and variance $\alpha\sigma^2$. Thus, $\mu=\alpha\sigma$ and $\phi = 1/\alpha$. We calculate $\mu_j$ for each gene $j$ and $L_i$ for each cell $i$ from the hybrid data set. For genes with dispersion, the $E[f] = \mu_0$. We next simulate the Poisson distribution using the **rpois(**$n$, $\lambda$) function in R.
+
+## Simulation
+```{r}
+# function to simulate a null gene and dispersed gene
+sim_gene <- function(n,alpha,sigma,Li, sigma_multiplier=1){
+
+  # Simulate a single gene with following parameters:
+  # n:                number of cells
+  # alpha:            alpha parameter
+  # sigma:            sigma parameter
+  # Li:               library size
+  # sigma_multiplier: factor to increase variance
+ 
+  # Returns expression values for single gene in n cells
+  
+  # initialize Y
+  Y <- rep(NA,n) 
+  
+  # calculate latent expression using gamma distribution
+  # ensure that simulation has mean within 10% of target
+  # perc_diff = 1
+  # while(perc_diff > 0.05){
+  lambdaj <- rgamma(n,shape = alpha/sigma_multiplier,scale = sigma*sigma_multiplier)
+  # perc_diff = (alpha*sigma - mean(lambdaj))/alpha*sigma
+  # }
+
+  
+  #lambdaj <- rgamma(n,shape = alpha/sigma_multiplier,scale = sigma*sigma_multiplier)
+  
+  # for each cell use the latent expression and library size to simulate expression
+  for(i in 1:n){
+  
+    Y[i] <- rpois(1,Li*lambdaj[i])
+  }
+  
+  return(Y)
+}
+
+
+# calculate alpha given mean expression and fixed sigma
+calc_alpha <- function(mu, sigma){
+  alpha = mu/sigma
+  return(alpha)
+}
+
+
+
+# Function to simulate genes within a bin of mean expression
+sim_bin <- function(n,p,phi,sigma_multiplier_ovr,sigma_multiplier_undr,Li,mean_expr_lwr,mean_expr_upr){
+  
+  # Simulate all genes with following parameters:
+  # n:                      number of cells
+  # p:                      number of genes
+  # phi:                    estimated dispersion parameter
+  # sigma_multiplier_ovr:   factor applied to sigma parameter for 5% of genes
+  # sigma_multiplier_undr:  factor applied to sigma parameter for 5% of genes
+  # Li:                     library size
+  # mean_expr_lwr:          lower bound of mean expression window
+  # mean_expr_upr:          upper bound of mean expression window
+ 
+  # Returns matrix of expression for n cells and p genes. 
+  # Returns vector of index values for simulated dispersed genes.
+  
+  # initialize Y for bin of expression
+  Y_bin <- matrix(NA,nrow=n,ncol=p)
+  
+  alpha_bin <- c()
+  sigma_bin <- c()
+  
+  n_bins_exp_window = 100
+  # breakdown expression range into p values
+  bin_expression <- seq(mean_expr_lwr,mean_expr_upr,length.out=n_bins_exp_window)
+  
+  # randomly select p expression means
+  bin_sim_idx <- sample.int(n_bins_exp_window, p, replace = TRUE)
+  # randomly select 10% to be significantly dispersed
+  bin_disp_idx <- sample.int(n_bins_exp_window, 0.1*p, replace = FALSE)
+  # make half of indices overdispersed and half underdispersed
+  half <- length(bin_disp_idx) / 2
+  bin_disp_idx_ovr <- bin_disp_idx[1:half]
+  bin_disp_idx_undr <- bin_disp_idx[(half + 1):length(bin_disp_idx)]
+  # get expression means
+  sim_expression_values <- bin_expression[bin_sim_idx]
+  
+  # simulate genes for each expression mean
+  for(i in 1:p){
+    
+    # get expression mean
+    mu <- sim_expression_values[i]
+    
+    # calculate sigma parameter
+    sigma <- mu*phi/Li
+    alpha <- 1/phi
+    #sigma <- mu*phi + 1
+    sigma_bin <- c(sigma_bin,sigma)
+    #sigma_disp <- mu*phi*phi_multiplier + 1
+    
+    # calculate alpha for fixed sigma based on expression mean
+    #alpha <- calc_alpha(mu,sigma)
+    alpha_bin <- c(alpha_bin,alpha)
+    #alpha_disp <- calc_alpha(mu,sigma_disp)
+    
+    # for dispersed genes multiply sigma by factor
+    if(i %in% bin_disp_idx_ovr){
+      
+       Y_bin[,i] <- sim_gene(n,alpha,sigma,Li,sigma_multiplier_ovr)
+    }
+    else if(i %in% bin_disp_idx_undr){
+      Y_bin[,i] <- sim_gene(n,alpha,sigma,Li,sigma_multiplier_undr)
+    }
+    else{
+      Y_bin[,i] <- sim_gene(n,alpha,sigma,Li,1)
+    }
+  }
+  
+  return(list("Y_bin"=Y_bin, "disp_idx_ovr"=bin_disp_idx_ovr,"disp_idx_undr"=bin_disp_idx_undr, "alpha_bin"=alpha_bin, "sigma_bin"=sigma_bin))
+}
+
+sim_Y <- function(n,p,phi,sigma_multiplier_ovr,sigma_multiplier_undr,Li,min_exp, max_exp,n_bins){
+  Y <- c()
+  disp_idx_ovr <- c()
+  disp_idx_undr <- c()
+  alphas <- c()
+  sigmas <- c()
+  #n_bins = p/100
+  n_genes_per_bin = p/n_bins
+  mean_intervals <- seq(min_exp, max_exp,length.out=(n_bins+1))
+  
+  for(i in 1:n_bins){
+    
+    mean_expr_lwr <- mean_intervals[i]
+    mean_expr_upr <- mean_intervals[i+1]
+    
+    gene_sim <- sim_bin(n,n_genes_per_bin,phi,sigma_multiplier_ovr,sigma_multiplier_undr,Li,mean_expr_lwr,mean_expr_upr)
+    Y_bin <- gene_sim$Y_bin
+    bin_disp_idx_ovr <- gene_sim$disp_idx_ovr + (i-1)*n_bins
+    bin_disp_idx_undr <- gene_sim$disp_idx_undr + (i-1)*n_bins
+    alpha_bin <- gene_sim$alpha_bin
+    sigma_bin <- gene_sim$sigma_bin
+    
+    Y <- cbind(Y,Y_bin)
+    disp_idx_ovr <- c(disp_idx_ovr,bin_disp_idx_ovr)
+    disp_idx_undr <- c(disp_idx_undr,bin_disp_idx_undr)
+    alphas <- c(alphas,alpha_bin)
+    sigmas <- c(sigmas, sigma_bin)
+  }
+  return(list("Y"=Y,"disp_idx_ovr"=disp_idx_ovr,"disp_idx_undr"=disp_idx_undr,"alpha"=alphas, "sigma"=sigmas))
+}
+
+
+
+```
+
+## Real Data Comparison
+
+We first calculate the mean gene expression for in the hybrid dataset using Human Cardiomyocytes from Replicate 3. Replicate 3 was chosen since there are 546 cells.
+
+```{r, message=F, warning=F, eval=F}
+require(Seurat)
+require(SeuratDisk)
+require(SeuratData)
+library(ggplot2)
+library(cowplot)
+library(scTenifoldNet)
+HC <- readRDS("/project/gilad/awchen55/differentialDispersion/data/hybrid_lines_raw_data/human.ASE.Rep3.rds")
+cardiomyocytes_data <- subset(HC, subset = (labels == "Cardiomyocytes"))
+cardiomyocytes_expression_data <- t(cardiomyocytes_data[['RNA']]$counts)
+rm(HC)
+```
+
+Filter out low expression genes.
+```{r, eval=F}
+# calculate mean expression and remove genes with low expression
+cardiomyocytes_expression_data_filtered <- cardiomyocytes_expression_data[, colSums(cardiomyocytes_expression_data != 0) > 10]
+
+# calculate library size
+library_sizes <- rowSums(cardiomyocytes_expression_data_filtered)
+
+# calculate mean expression
+mean_expression <- colMeans(cardiomyocytes_expression_data_filtered)
+```
+
+
+We simulate from 546 cells of cardiomyocytes. We simulate each gene from the real dataset and compare to the simulation.
+
+```{r}
+set.seed(20250503)
+n=546
+phi = 0.654
+avg_li = mean(library_sizes)
+# calculate sigma parameter
+sigmas <- mean_expression*phi/avg_li
+alpha <- 1/phi
+p=length(sigmas)
+Y <- matrix(NA,nrow=n,ncol=p)
+for(i in 1:p){
+  Y[,i] <- sim_gene(n,alpha,sigmas[i],avg_li)
+}
+
+
+```
+
+Convert to Seurat Object to run memento
+```{r}
+counts <- t(Y)  # now p (genes) x n (cells)
+
+# add names (recommended)
+rownames(counts) <- paste0("gene_", seq_len(nrow(counts)))
+colnames(counts) <- paste0("cell_", seq_len(ncol(counts)))
+
+# (optional) metadata for this simulated dataset
+meta <- data.frame(
+  celltype   = rep("CellType", ncol(counts)),
+  individual = rep("Ind1",        ncol(counts)),
+  replicate  = rep("Rep1",        ncol(counts)),
+  row.names  = colnames(counts),
+  stringsAsFactors = FALSE
+)
+
+seu <- CreateSeuratObject(
+  counts   = counts, 
+   project = "SimData", 
+   min.cells = 3,  # Minimum cells expressing a gene
+   min.features = 10)  # Minimum features per cell
+
+seu@meta.data <- meta
+# sanity checks
+seu
+dim(seu[["RNA"]]$counts)   # genes x cells
+head(seu@meta.data)
+file_name <- '/project/gilad/awchen55/differentialDispersion/data/simulation_mean_var_independence/sim_cardiomyocytes'
+saveRDS(seu, file = paste0(file_name,".rds"))
+# SaveH5Seurat(seu, filename = paste0(file_name, ".h5Seurat"), overwrite = TRUE)
+# Convert(filename = paste0(file_name, ".h5Seurat", dest = "h5ad", overwrite = TRUE))
+```
+
+Convert into components to convert Seurat to anndata.
+```{r}
+library(Matrix)
+outdir <- '/project/gilad/awchen55/differentialDispersion/data/simulation_mean_var_independence/'
+# counts (genes x cells)
+counts <- GetAssayData(seu, assay = "RNA", slot = "counts")
+
+Matrix::writeMM(counts, file = file.path(outdir, "counts.mtx"))
+writeLines(rownames(counts), con = file.path(outdir, "genes.txt"))
+writeLines(colnames(counts), con = file.path(outdir, "barcodes.txt"))
+
+meta <- seu@meta.data
+meta$barcode <- rownames(meta)  # keep an explicit key
+write.csv(meta, file = file.path(outdir, "cell_metadata.csv"), row.names = FALSE)
+```
+
+
+
+
+## QQ Plot to compare real data to simulated data
+
+```{r}
+file_name <- '/project/gilad/awchen55/differentialDispersion/data/simulation_mean_var_independence/sim_cardiomyocytes'
+y_sim <- readRDS(paste0(file_name,".rds"))
+results_path <- '/project/gilad/awchen55/differentialDispersion/variability_paper/supplement/'
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Flatten matrices to vectors
+real_vals <- as.numeric(cardiomyocytes_expression_data_filtered)
+sim_vals  <- as.numeric(t(y_sim[["RNA"]]$counts))
+
+# Use all quantiles
+n <- min(length(real_vals), length(sim_vals))
+
+qq_df <- data.frame(
+  real = quantile(real_vals, probs = seq(0, 1, length.out = n), na.rm = TRUE),
+  sim  = quantile(sim_vals,  probs = seq(0, 1, length.out = n), na.rm = TRUE)
+)
+
+p <- ggplot(qq_df, aes(x = real, y = sim)) +
+  geom_point(alpha =0.6, size = 1.5, color = "blue") +
+  geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) +
+  labs(
+    title = "",
+    x = "Real Data Quantiles",
+    y = "Simulated Data Quantiles"
+  ) +
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+
+print(p)
+
+# Save as PNG instead of PDF for dense plots
+ggsave(
+  filename = paste0(results_path, "qq_plot_real_vs_simulated.png"),
+  plot = p,
+  width = 6,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+
+
+## Compare mean and dispersion in simulation]
+
+```{r}
+outdir <- '/project/gilad/awchen55/differentialDispersion/data/simulation_mean_var_independence/'
+var_est <- read.csv(paste0(outdir,"memento_var_estimate_simulation.csv"))
+mean_est <- read.csv(paste0(outdir,"memento_mean_estimate_simulation.csv"))
+```
+
+```{r}
+plot_df <- var_est %>%
+  dplyr::select(gene, sg.Ind1.Rep1.CellType) %>%
+  dplyr::rename(dispersion = sg.Ind1.Rep1.CellType) %>%
+  dplyr::left_join(
+    mean_est %>%
+      dplyr::select(gene, sg.Ind1.Rep1.CellType) %>%
+      dplyr::rename(mean = sg.Ind1.Rep1.CellType),
+    by = "gene"
+  ) %>%
+  dplyr::filter(!is.na(mean), !is.na(dispersion))
+
+rho <- cor(plot_df$mean, plot_df$dispersion, method = "spearman")
+
+label_text <- paste0("Spearman \u03C1 = ", round(rho, 3))
+
+x_pos <- max(plot_df$mean, na.rm = TRUE) * 0.98
+y_pos <- max(plot_df$dispersion, na.rm = TRUE) * 0.98
+
+p <- ggplot(plot_df, aes(x = mean, y = dispersion)) +
+  geom_point(alpha = 0.6, size = 1.5, color = "blue") +
+  annotate(
+    "text",
+    x = x_pos,
+    y = y_pos,
+    label = label_text,
+    hjust = 1,
+    vjust = 1,
+    size = 5
+  ) +
+  labs(
+    x = "Mean",
+    y = "Dispersion"
+  ) +
+  theme_classic() +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8)
+  )
+
+p
+
+ggsave(
+  paste0(results_path, "mean_dispersion_independence_simulated.pdf"),
+  plot = p,
+  width = 6,
+  height = 6
+)
+```
