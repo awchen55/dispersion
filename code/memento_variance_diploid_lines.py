@@ -25,7 +25,7 @@ adata = sc.read(data_path + 'parent_crossfilt_celltypes_of_interest.h5ad')
 # setup memento
 adata.obs['capture_rate'] = 0.2
 memento.setup_memento(adata, q_column='capture_rate')
-memento.create_groups(adata, label_columns=['species','celltype','replicate'])
+memento.create_groups(adata, label_columns=['species','individual','replicate','celltype'])
 
 # compute moments
 memento.compute_1d_moments(adata,
