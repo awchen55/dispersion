@@ -1,0 +1,2762 @@
+---
+title: "main_figs_1-4_related_supp"
+output: html_document
+date: "2026-03-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dreamlet)
+library(variancePartition)
+library(tidyr)
+library(readr)
+library(viridisLite)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(readxl)
+library(stringr)
+library(biomaRt)
+library(Seurat)
+library(data.table)          
+library(Matrix)
+library(tidyverse)                                        
+library(cowplot)    
+library(ggrepel)
+library(RColorBrewer)
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library('pheatmap')
+library("DOSE")
+library("enrichplot")
+library("ggupset")
+library(CormotifCounts)
+library(ComplexHeatmap)
+library(circlize)
+library(rlang)
+library(BiocParallel)
+library(tibble)
+library(SingleCellExperiment)
+library(grid)
+library(ggpubr)
+library(readxl)
+dir <- "/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/"
+
+res_var_df <- read.csv(paste0(dir, "analysis/datasets/memento/new_res_var_by_cell_type_ind_1000_cts_new_predicted_id.csv"), row.names = 1)
+
+ribo_genes_full <- rownames(res_var_df)[grepl("^RP", rownames(res_var_df))]
+
+res_var_df <- res_var_df %>%
+  filter(!rownames(.) %in% ribo_genes_full)
+
+mean_df <- read.csv(paste0(dir, "analysis/datasets/memento/new_mean_expression_by_cell_type_ind_1000_cts_new_predicted_id.csv"), row.names = 1)
+
+mean_df <- mean_df %>%
+  filter(!rownames(.) %in% ribo_genes_full)
+```
+
+# Notes
+## Making the ranked dispersion tables
+```{r}
+# produce gene ranking dataframe
+cell_types <- c(
+  "Cardiomyocytes", "Mesenchymal_cells", "Cardiac_fibroblasts", 
+  "Epithelial_cells", "Activated_fibroblasts", "Foregut_endodermal_cells"
+)
+
+## Bin median variability within cell types into quintiles by rank ...................
+ct_ranks_df <- as.data.frame(matrix(data = NA,
+                      nrow = length(rownames(res_var_df)),
+                      ncol = length(cell_types)))
+colnames(ct_ranks_df) <- cell_types
+rownames(ct_ranks_df) <- rownames(res_var_df)
+
+for (cell_type in cell_types){
+  # Build the column names for this cell type across all individuals
+  cols <- paste0(c("NA19099_", "NA19093_", "NA18522_"), cell_type)
+  
+  # Select those columns from res_var_df and take median value
+  ct_res_var <- res_var_df %>% dplyr::select(all_of(cols))
+  median_res_var <- data.frame(med_vals = apply(ct_res_var, 1, function(x) median(x)))
+  
+  # Rank from lowest to highest
+  ranks <- rank(median_res_var, ties.method = "average")
+  
+  # Fill into the right column (gene order is preserved)
+  ct_ranks_df[ , cell_type] <- ranks
+}
+
+## Convert ranks into quintiles ...................
+n_genes <- nrow(ct_ranks_df)
+n_quantiles <- 5
+
+quantile_bins <- apply(ct_ranks_df, 2, function(x) {
+  cut(x, 
+      breaks = quantile(x, probs = seq(0, 1, length.out = n_quantiles + 1), na.rm = TRUE), 
+      labels = FALSE, 
+      include.lowest = TRUE)
+})
+
+rownames(quantile_bins) <- rownames(ct_ranks_df)
+var_quintile_dfs <- as.data.frame(quantile_bins)
+```
+
+# Figure 1 and related supplementary figures
+## B
+```{r}
+# upload the Seurat object
+brendan_obj <- readRDS("/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/100k_full_filtered_norm_seurat.rds")
+```
+
+```{r}
+# Ensure metadata column is clean factor
+brendan_obj$new.predicted.id <- factor(brendan_obj$new.predicted.id)
+brendan_obj$new.predicted.id <- droplevels(brendan_obj$new.predicted.id)
+
+brendan_obj$clean.new.pred.id <- gsub("_", " ", brendan_obj$new.predicted.id)
+brendan_obj$clean.new.pred.id <- factor(brendan_obj$clean.new.pred.id)
+```
+
+```{r}
+celltype_colors <- c(
+  "Activated fibroblasts" = "#117733",
+  "Cardiac fibroblasts" = "#4477AA",
+  "Cardiomyocytes" = "#882255",
+  "Endothelial cells" = "#C45F00",
+  "Epicardial cells" = "#661100",
+  "Epithelial cells" = "#AA4499",
+  "Foregut endodermal cells" = "#CC6677",
+  "Hematopoietic cells" = "#999933",
+  "Hepatic endodermal cells" = "#44AA99",
+  "Mesenchymal cells" = "#DDCC77",
+  "Neural crest cells" = "#332288",
+  "Neural progenitor cells" = "#AA7744",
+  "Neuroectodermal cells" = "#6699CC",
+  "Proliferating fibroblasts" = "gold1"
+)
+
+# Create UMAP
+fig1a <- DimPlot(
+  brendan_obj,
+  reduction = "umap",
+  group.by = "clean.new.pred.id",
+  cols = celltype_colors,
+  label = FALSE,     # remove cluster text labels
+  pt.size = 0.01,
+  raster = FALSE
+) +
+  theme_classic(base_family = "Arial") +
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 5),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_text(size = 6),
+    text = element_text(size = 6),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+    legend.key.size = unit(2.5, "mm"),
+    legend.spacing.y = unit(1, "mm")
+  ) +
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2",
+    color = NULL
+  )
+fig1a
+```
+
+## C
+```{r}
+
+cell_counts <- as.data.frame(table(brendan_obj$new.predicted.id, brendan_obj$vireo.individual))
+
+cell_counts <- cell_counts %>%
+  mutate(
+    pass_threshold = Freq >= 1000
+  ) %>%
+  mutate(clean_ct = gsub("_", " ", Var1)) %>%
+  mutate(sample_id = paste0(Var2, "_", Var1))
+
+colnames(cell_counts) <- c("cell_type", "cell_line", "count", "pass_threshold", "clean_cell_type", "sample_id")
+
+cell_line_colors <- c(
+  "NA19099" = "#117733",
+  "NA19093" = "#4477AA",
+  "NA18522" = "#B22222"
+)
+
+cell_counts$clean_cell_type <- factor(cell_counts$clean_cell_type)
+
+p_cells_stacked <- ggplot(cell_counts,
+                          aes(x = clean_cell_type,
+                              y = count,
+                              fill = cell_line)) +
+
+  geom_col(
+    width = 0.8,
+    linewidth = 0
+  ) +
+
+  scale_fill_manual(values = cell_line_colors) +
+
+  labs(
+    x = "Cell type",
+    y = "Number of cells",
+    fill = "Individual"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(
+      size = 6,
+      angle = 45,
+      hjust = 1
+    ),
+    axis.line = element_line(linewidth = 0.4),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ),
+    legend.position = "right",
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    legend.key.size = unit(6, "pt"),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm")
+  )
+
+p_cells_stacked
+```
+
+## D
+```{r}
+# make vector of selected samples
+samples <- c("NA19099_Cardiomyocytes", "NA18522_Mesenchymal_cells", "NA19093_Cardiac_fibroblasts", "NA19099_Epithelial_cells", "NA19093_Activated_fibroblasts", "NA19093_Foregut_endodermal_cells")
+```
+
+```{r}
+sample <- samples[1]
+  cell_type <- cell_types[1]
+  
+  clean_cell_type <- gsub("_", " ", cell_type)
+    
+  ct_res_var <- res_var_df %>%
+    dplyr::select(all_of(sample)) %>%
+    dplyr::mutate(gene = rownames(.)) %>%
+    dplyr::rename(res_var = sample)
+    
+  ct_mean_var <- mean_df %>%
+    dplyr::select(all_of(sample)) %>%
+    dplyr::mutate(gene = rownames(.)) %>%
+    dplyr::rename(mean = sample)
+    
+  df <- ct_res_var %>%
+    dplyr::inner_join(ct_mean_var, by = "gene")
+  
+  # Compute Pearson correlation
+  cor_test <- cor.test(df$mean, df$res_var, method = "spearman")
+  
+  rho_val <- round(cor_test$estimate, 4)
+  
+  # Generate plot
+  plot <- ggplot(df, aes(x = mean, y = res_var)) +
+  geom_point(
+    color = viridis(1, option = "C"),
+    alpha = 0.2,
+    size = 0.4
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = Inf,
+    label = paste0("Spearman ρ = ", rho_val),
+    hjust = 1.1,
+    vjust = 1.5,
+    size = 2  # ~6 pt at final 90 mm size
+  ) +
+  theme_classic(base_family = "Arial") +
+    
+    labs(
+    title = clean_cell_type
+  ) +
+    theme(
+      axis.text.x = element_text(size = 6),
+      axis.title.x = element_text(size = 7),
+      axis.text.y = element_text(size = 6),
+      axis.title.y = element_text(size = 7, angle = 90),
+      title = element_text(size = 7)
+    ) +
+    labs(y = "Dispersion",
+         x = "Mean")
+  
+plot
+```
+
+
+## Supp S1
+```{r}
+seq_metrics <- read.csv(paste0(dir, "sequencing_metrics_per_lane.csv"), row.names = 1)
+# Convert all columns except the first (lane names) to numeric
+seq_metrics[ , 19:20] <- lapply(seq_metrics[ , 19:20], function(x) {
+  as.numeric(gsub(",", "", x))
+})
+seq_metrics[ , 6:18] <- lapply(seq_metrics[ , 6:18], function(x) {
+  as.numeric(gsub("%", "", x)) / 100
+})
+
+colnames(seq_metrics)
+```
+
+```{r}
+plot <- ggplot(seq_metrics, aes(x = lane, y = Total.Genes.Detected)) +
+  geom_bar(stat = "identity") +
+  labs(
+    x = NULL,
+    y = gsub("\\.", " ", colnames(seq_metrics)[19]),
+    title = gsub("\\.", " ", colnames(seq_metrics)[19])
+  ) +
+  scale_y_continuous(limits = c(0, 40000)) +
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(
+      size = 6,
+      angle = 45,
+      hjust = 1
+    ),
+    axis.line = element_line(linewidth = 0.4),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ), 
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"))
+
+plot
+```
+
+## Supp S4
+```{r}
+samples <- colnames(res_var_df)
+# split sample into parts
+split_parts <- strsplit(samples, "_")
+
+cell_line <- sapply(split_parts, `[`, 1)
+cell_type <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+# define desired order
+cell_line_order <- c("NA19099", "NA19093", "NA18522")
+
+cell_type_order <- cell_types
+
+# order index
+new_order <- order(
+  factor(cell_line, levels = cell_line_order),
+  factor(cell_type, levels = cell_type_order)
+)
+
+samples_reordered <- samples[new_order]
+
+res_var_df <- res_var_df %>%
+  dplyr::select(all_of(samples_reordered))
+```
+
+```{r}
+common_ylim = c(-4, 8)
+common_xlim = c(-15,0)
+
+plots <- list()
+
+for(i in 1:length(samples_reordered)){
+  sample <- samples_reordered[i]
+  cell_type <- cell_types[i]
+  
+  clean_cell_type <- gsub("_", " ", cell_type)
+    
+  ct_res_var <- res_var_df %>%
+    dplyr::select(all_of(sample)) %>%
+    dplyr::mutate(gene = rownames(.)) %>%
+    dplyr::rename(res_var = sample)
+    
+  ct_mean_var <- mean_df %>%
+    dplyr::select(all_of(sample)) %>%
+    dplyr::mutate(gene = rownames(.)) %>%
+    dplyr::rename(mean = sample)
+    
+  df <- ct_res_var %>%
+    dplyr::inner_join(ct_mean_var, by = "gene")
+  
+  # Compute Pearson correlation
+  cor_test <- cor.test(df$mean, df$res_var, method = "spearman")
+  
+  rho_val <- round(cor_test$estimate, 4)
+  
+  # Generate plot
+  plot <- ggplot(df, aes(x = mean, y = res_var)) +
+  geom_point(
+    color = viridis(1, option = "C"),
+    alpha = 0.2,
+    size = 0.4
+  ) +
+  annotate(
+    "text",
+    x = Inf, y = Inf,
+    label = paste0("Spearman ρ = ", rho_val),
+    hjust = 1.1,
+    vjust = 1.5,
+    size = 2  # ~6 pt at final 90 mm size
+  ) +
+  theme_classic(base_family = "Arial") +
+    
+    labs(
+    title = NULL
+  ) +
+  
+  theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            axis.line = element_line(colour = "black"),
+            axis.text.x = element_blank(),  # Remove x-axis text
+            axis.text.y = element_blank(),  # Remove y-axis text
+            #axis.ticks.x = element_blank(),  # Remove x-axis ticks
+            #axis.ticks.y = element_blank(),  # Remove y-axis ticks
+            plot.title = element_text(size = 6, face = "bold", hjust = 0.5),
+            axis.title.x = element_blank(),
+            axis.title.y = element_blank()
+            ) +
+      ylim(common_ylim) +   # Set common y-axis limits
+      xlim(common_xlim)  # Set common x-axis limits
+  
+  # Display cell type for first 6 plots
+  if (i == 1 | i == 2 | i == 3 | i == 4 | i == 5 | i == 6) {
+    plot <- plot + labs(title = clean_cell_type)
+  }
+  
+    # Display y axis for specific plots
+    if (i == 1 | i == 7 | i == 13) {
+      plot <- plot + theme(axis.text.y = element_text(size = 6),
+                           axis.title.y = element_text(size = 7, angle = 90)) +
+        labs(y = "Dispersion")
+      }
+    
+    # Display x axis text and x axis title for specific plots
+    if (i == 13 | i == 14 | i == 15 | i == 16 | i == 17 | i == 18) {
+      plot <- plot + theme(axis.text.x = element_text(size = 6),
+                           axis.title.x = element_text(size = 7)) +
+        labs(x = "Mean")
+    }
+# Store the plot in the list
+    plots[[sample]] <- plot
+}
+
+# Combine all plots into a single grid with 3 columns
+combined_plot <- wrap_plots(plots) + 
+  plot_layout(ncol = 6, axis_titles = "collect")
+```
+
+# Figure 2 and related supplementary figures
+## A
+```{r}
+# By sheet name
+res_df <- read_excel(paste0(dir, "analysis/first_pub_datasets/Supplementary_table_s2.xlsx"), sheet = "Low_dispersion_GO_enrichment") %>%
+  # filter for cluster_resolution == 0.2
+  filter(cluster_resolution == "2")
+```
+
+```{r}
+plot_df <- res_df %>%
+  # Match clusterProfiler behavior: smallest p.adjust first
+  arrange(p.adjust) %>%
+  head(8) %>%
+  mutate(
+    # Convert GeneRatio from "x/y" → numeric
+    GeneRatio_num = as.numeric(str_split_fixed(GeneRatio, "/", 2)[,1]) /
+                    as.numeric(str_split_fixed(GeneRatio, "/", 2)[,2]),
+
+    # -log10 adjusted p-value
+    log10_padj = -log10(p.adjust),
+
+    # Match ordering in dotplot (top = most significant)
+    Description = factor(ID, levels = rev(ID))
+  )
+```
+
+```{r}
+p <- ggplot(plot_df, aes(x = GeneRatio_num, y = Description)) +
+  geom_point(aes(size = Count, color = log10_padj)) +
+
+  # Match color scale
+  scale_color_gradient(
+    low = "grey85",
+    high = "#8B0000",
+    name = expression(-log[10](adjusted~p))
+  ) +
+
+  # Match size scaling feel
+  scale_size(range = c(2, 6)) +
+
+  labs(
+    title = "GO enrichment: consistently low-dispersed genes",
+    x = "Gene ratio",
+    y = NULL
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+
+    # Match legend key sizing
+    legend.key.height = unit(3, "mm"),
+    legend.key.width  = unit(3, "mm"),
+
+    # Tight margins like your original
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+
+    # This is important for matching geometry feel
+    aspect.ratio = 2
+  )
+
+p
+```
+
+## B
+```{r}
+# Convert from Seurat to Single Cell Experiment
+DefaultAssay(brendan_obj) <- "RNA"
+sce_obj <- as.SingleCellExperiment(brendan_obj)
+
+# run dreamlet function to split sce object by cell type and individual
+assayNames(sce_obj)
+colnames(colData(sce_obj))
+
+# Aggregate SCE to pseudo-bulk
+pb <- aggregateToPseudoBulk(
+  sce_obj,
+  assay = "counts",
+  sample_id = "vireo.individual",
+  cluster_id = "new.predicted.id"
+)
+
+# extract the aggr_means data frame from the metadata slot
+aggr_means_df <- metadata(pb)$aggr_means
+```
+
+```{r}
+# subset metadata to res_var samples
+aggr_means_df <- aggr_means_df[aggr_means_df$sample_id %in% colnames(res_var_df),]
+
+# reorder metadata rows to match sample order in res_var (columns)
+aggr_means_df <- aggr_means_df[match(colnames(res_var_df), aggr_means_df$sample_id), ]
+
+# construct the metadata table
+metadata <- data.frame(
+  cell_type = factor(rep(unique(aggr_means_df$new.predicted.id), each = 3)),
+  cell_line = factor(rep(c("NA19099", "NA19093", "NA18522"), times = 6)),
+  nFeatures = scale(aggr_means_df$nFeature_RNA),
+  nCount = scale(aggr_means_df$nCount_RNA),
+  cell_count = scale(aggr_means_df$cell_num),
+  perc_mt = scale(aggr_means_df$percent.mt),
+  log_umi = aggr_means_df$log_umi
+)
+rownames(metadata) <- colnames(res_var_df)
+
+form <- ~ cell_count + nFeatures + perc_mt + (1 | cell_type)
+
+vp_res_var <- fitExtractVarPartModel(res_var_df, form, metadata)
+median(vp_res_var$cell_type)
+```
+
+```{r}
+# Generate base plot
+vp_plot_res_var <- plotVarPart(sortCols(vp_res_var))
+
+# Replace default palette with viridis discrete
+vp_plot_res_var <- vp_plot_res_var +
+  #scale_fill_viridis_d(option = "B") +
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    legend.position = "right",
+    panel.grid = element_blank(),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm")
+  )
+
+vp_plot_res_var
+```
+
+## C
+```{r}
+# load in seurat object if necessary
+brendan_obj <- readRDS(paste0(dir, "analysis/datasets/100k_full_filtered_norm_seurat.rds"))
+```
+
+```{r}
+split_parts <- strsplit(colnames(res_var_df), "_", fixed = TRUE)
+cell_type <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+cell_types <- unique(cell_type)
+
+cell_counts <- read.csv(paste0(dir, "analysis/datasets/cell_counts_new_pred_id.csv"), row.names = 1)
+```
+
+```{r}
+cormat <- cor(res_var_df, method = "pearson")
+
+all_individuals <- c("NA19099", "NA19093", "NA18522")
+
+all_cell_types  <- c(
+  "Cardiomyocytes",
+  "Mesenchymal_cells",
+  "Cardiac_fibroblasts",
+  "Epithelial_cells",
+  "Activated_fibroblasts",
+  "Foregut_endodermal_cells"
+)
+
+# Extract metadata
+individual <- sapply(split_parts, `[`, 1)
+cell_type  <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+# 🔒 Force stable factor levels
+individual <- factor(individual, levels = all_individuals)
+cell_type  <- factor(cell_type,  levels = all_cell_types)
+
+# 🔒 Create fixed color mappings
+individual_palette <- RColorBrewer::brewer.pal(8, "Paired")
+individual_cols <- setNames(individual_palette[seq_along(all_individuals)],
+                            all_individuals)
+
+cell_type_palette <- RColorBrewer::brewer.pal(12, "Paired")
+cell_type_cols <- setNames(cell_type_palette[seq_along(all_cell_types)],
+                           all_cell_types)
+
+# --- Annotation ---
+ha <- columnAnnotation(
+  Individual = individual,
+  Cell_Type  = cell_type,
+  Cell_Count = anno_barplot(
+    cell_counts$Freq,
+    gp = gpar(fill = "grey30", col = NA),
+    border = FALSE
+  ),
+  col = list(
+    Individual = individual_cols,
+    Cell_Type  = cell_type_cols
+  ),
+  gp = gpar(fontsize = 6, fontfamily = "Arial"),
+  annotation_name_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+  annotation_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical",
+    ncol = 1
+  )
+)
+
+# --- Heatmap ---
+HCheat <- Heatmap(
+  cormat,
+  top_annotation = ha,
+  name = "Correlation",
+  col = circlize::colorRamp2(
+    seq(0.8, 1, length.out = 11),
+    inferno(11)
+  ),
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_row_dend = FALSE,
+  show_column_dend = TRUE,
+  column_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  row_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  heatmap_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical"
+  )
+)
+
+res_var_hm <- draw(
+  HCheat,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+res_var_hm
+```
+
+## D
+```{r}
+# By sheet name
+dv_de_res <- read_excel(paste0(dir, "analysis/first_pub_datasets/Supplementary_table_s1.xlsx"), sheet = "cardiac_HDC_results") %>%
+  # dplyr::select for columns that include "K"
+  dplyr::select(contains("K"))
+
+# make a dispersion data frame from dv_de_res by selecting columns that include "dispersion" in the column name
+card_dv_res <- dv_de_res %>%
+  dplyr::select(contains("dispersion"))
+
+#card_foregut_dv_res <- card_dv_res[,10:12]
+
+# make a mean data frame from dv_de_res by selecting columns that include "mean" in the column name
+card_de_res <- dv_de_res %>%
+  dplyr::select(contains("mean"))
+
+## RES VAR VS MEAN EFFECT SIZE
+plot_df <- data.frame(
+  gene = rownames(dv_de_res),
+  de_logFC = -card_de_res$mean_logFC_K,
+  dv_logFC = -card_dv_res$dispersion_logFC_K,
+  dv_sig = card_dv_res$dispersion_adj.P.Val_K <= 0.05,
+  de_sig = card_de_res$mean_adj.P.Val_K <= 0.05
+)
+
+# Plot
+# Ensure logical is treated consistently
+plot_df$dv_sig <- factor(plot_df$dv_sig, levels = c(FALSE, TRUE))
+
+mean_vs_var <- ggplot(plot_df, aes(x = de_logFC,
+                                   y = dv_logFC,
+                                   color = dv_sig)) +
+  geom_hline(
+  yintercept = 0,
+  linetype = "dashed",
+  linewidth = 0.4,
+  color = "grey40"
+) +
+
+geom_vline(
+  xintercept = 0,
+  linetype = "dashed",
+  linewidth = 0.4,
+  color = "grey40"
+) +
+
+  geom_point(
+    size = 0.8,
+    alpha = 0.8
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "FALSE" = "grey70",
+      "TRUE"  = "#B22222"
+    ),
+    labels = c("FALSE" = "Non DD",
+               "TRUE"  = "DD")
+  ) +
+
+  labs(
+    x = "DE log2 fold change",
+    y = "DD log2 fold change",
+    color = NULL
+  ) +
+
+  theme_classic(base_family = "Arial") +
+
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.line = element_line(linewidth = 0.4),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ),
+    legend.position = "right",
+    legend.text = element_text(size = 6),
+    legend.key.size = unit(6, "pt"),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm")
+  )
+
+mean_vs_var
+```
+
+## Supp S2
+```{r}
+## genes in 1st quintile of variability in all cell types ...................
+var_first_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 1) >= 6) %>%
+  rownames(.)
+
+var_fifth_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 5) >= 6) %>%
+  rownames(.)
+
+never_first_fifth_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(!. == 1) >= 6 & rowSums(!. == 5) >= 6) %>%
+  rownames(.)
+
+## find where along mean expression distribution these genes lie ..............
+# global median mean
+global_mean_ranks_df <- data.frame(
+  gene = rownames(mean_df),
+  global_rank = rank(apply(mean_df, 1, median), ties.method = "average")
+)
+
+# flag genes that are in 1st quintile of variability
+plot_df <- data.frame(gene = rownames(var_quintile_dfs)) %>%
+  mutate(first_quint_var = gene %in% var_first_quint_genes) %>%
+  mutate(fifth_quint_var = gene %in% var_fifth_quint_genes) %>%
+  mutate(never_first_fifth = gene %in% never_first_fifth_genes) %>%
+  mutate(other_genes = !gene %in% var_first_quint_genes & !gene %in% var_fifth_quint_genes & !gene %in% never_first_fifth_genes) %>%
+  left_join(global_mean_ranks_df, by = "gene") %>%
+  mutate(mean_quintiles = cut(plot_df$global_rank,
+                              breaks = quantile(plot_df$global_rank, probs = seq(0, 1, length.out = 5 + 1),
+                                                na.rm = TRUE),
+                              labels = FALSE,
+                              include.lowest = TRUE)) %>%
+  mutate(mean_percentiles = cut(plot_df$global_rank,
+                                breaks = quantile(plot_df$global_rank, probs = seq(0,1, length.out = 100 + 1),
+                                                  na.rm = TRUE),
+                                labels = FALSE,
+                                include.lowest = TRUE)) %>%
+  mutate(mean_20_breaks = cut(plot_df$global_rank,
+                                breaks = quantile(plot_df$global_rank, probs = seq(0,1, length.out = 20 + 1),
+                                                  na.rm = TRUE),
+                                labels = FALSE,
+                                include.lowest = TRUE))
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = c(fifth_quint_var, first_quint_var, never_first_fifth, other_genes),
+    names_to = "quintile_group",
+    values_to = "is_member"
+  ) %>%
+  filter(is_member)  
+
+df_counts <- plot_long %>%
+  count(mean_quintiles, quintile_group)
+plot <- ggplot(df_counts[df_counts$quintile_group == "fifth_quint_var" | df_counts$quintile_group == "first_quint_var",], aes(x = factor(mean_quintiles), y = n, fill = quintile_group)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c(
+    "fifth_quint_var" = "steelblue",
+    "first_quint_var" = "firebrick"
+  ),
+  labels = c(
+      "fifth_quint_var" = "High-dispersion",
+      "first_quint_var" = "Low-dispersion")) +
+  labs(
+    x = "Mean expression Quintile",
+    y = "Number of Genes",
+    fill = "Dispersion group"
+  ) +
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4)
+    )
+plot
+```
+
+## Supp S3
+```{r}
+# REPLACE "2" WITH "05" OR "08"
+# By sheet name
+res_df <- read_excel(paste0(dir, "analysis/first_pub_datasets/Supplementary_table_s2.xlsx"), sheet = "Low_dispersion_GO_enrichment") %>%
+  # filter for cluster_resolution == 0.2
+  filter(cluster_resolution == "2")
+```
+
+```{r}
+plot_df <- res_df %>%
+  # Match clusterProfiler behavior: smallest p.adjust first
+  arrange(p.adjust) %>%
+  head(8) %>%
+  mutate(
+    # Convert GeneRatio from "x/y" → numeric
+    GeneRatio_num = as.numeric(str_split_fixed(GeneRatio, "/", 2)[,1]) /
+                    as.numeric(str_split_fixed(GeneRatio, "/", 2)[,2]),
+
+    # -log10 adjusted p-value
+    log10_padj = -log10(p.adjust),
+
+    # Match ordering in dotplot (top = most significant)
+    Description = factor(ID, levels = rev(ID))
+  )
+```
+
+```{r}
+p <- ggplot(plot_df, aes(x = GeneRatio_num, y = Description)) +
+  geom_point(aes(size = Count, color = log10_padj)) +
+
+  # Match color scale
+  scale_color_gradient(
+    low = "grey85",
+    high = "#8B0000",
+    name = expression(-log[10](adjusted~p))
+  ) +
+
+  # Match size scaling feel
+  scale_size(range = c(2, 6)) +
+
+  labs(
+    title = "GO enrichment: consistently low-dispersed genes",
+    x = "Gene ratio",
+    y = NULL
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+
+    # Match legend key sizing
+    legend.key.height = unit(3, "mm"),
+    legend.key.width  = unit(3, "mm"),
+
+    # Tight margins like your original
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+
+    # This is important for matching geometry feel
+    aspect.ratio = 2
+  )
+
+p
+```
+## Supp S6
+```{r}
+# Mean expression correlations
+cormat <- cor(mean_df)
+
+all_individuals <- c("NA19099", "NA19093", "NA18522")
+
+all_cell_types  <- c(
+  "Cardiomyocytes",
+  "Mesenchymal_cells",
+  "Cardiac_fibroblasts",
+  "Epithelial_cells",
+  "Activated_fibroblasts",
+  "Foregut_endodermal_cells"
+)
+
+# Extract metadata
+individual <- sapply(split_parts, `[`, 1)
+cell_type  <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+# 🔒 Force stable factor levels
+individual <- factor(individual, levels = all_individuals)
+cell_type  <- factor(cell_type,  levels = all_cell_types)
+
+# 🔒 Create fixed color mappings
+individual_palette <- RColorBrewer::brewer.pal(8, "Paired")
+individual_cols <- setNames(individual_palette[seq_along(all_individuals)],
+                            all_individuals)
+
+cell_type_palette <- RColorBrewer::brewer.pal(12, "Paired")
+cell_type_cols <- setNames(cell_type_palette[seq_along(all_cell_types)],
+                           all_cell_types)
+
+ha <- columnAnnotation(
+  Individual = individual,
+  Cell_Type = cell_type,
+  Cell_Count = anno_barplot(cell_counts$Freq),
+  col = list(
+    Individual = individual_cols,
+    Cell_Type = cell_type_cols
+  ),
+  gp = gpar(fontsize = 7),
+  annotation_name_gp = gpar(fontsize = 7),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 7),
+    labels_gp = gpar(fontsize = 7),
+    direction = "vertical",
+    ncol = 1
+  )
+)
+
+rownames(cormat) <- colnames(mean_df)
+colnames(cormat) <- colnames(mean_df)
+
+HCheat <- Heatmap(
+  cormat,
+  top_annotation = ha,
+  name = "Correlation",
+  col = circlize::colorRamp2(
+    seq(0.7, 1, length.out = 11),
+    inferno(11)
+  ),
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_row_dend = FALSE,
+  show_column_dend = TRUE,
+  column_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  row_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  heatmap_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical"
+  )
+) 
+mean_hm <- draw(HCheat,heatmap_legend_side = "right")
+mean_hm
+```
+
+```{r}
+# Mean vs res_var across samples
+
+# Assumes both matrices have genes as rows and samples as columns
+cross_cor_mat <- cor(mean_df, res_var_df, use = "pairwise.complete.obs", method = "spearman")
+
+all_individuals <- c("NA19099", "NA19093", "NA18522")
+
+all_cell_types  <- c(
+  "Cardiomyocytes",
+  "Mesenchymal_cells",
+  "Cardiac_fibroblasts",
+  "Epithelial_cells",
+  "Activated_fibroblasts",
+  "Foregut_endodermal_cells"
+)
+
+# Extract metadata
+individual <- sapply(split_parts, `[`, 1)
+cell_type  <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+# 🔒 Force stable factor levels
+individual <- factor(individual, levels = all_individuals)
+cell_type  <- factor(cell_type,  levels = all_cell_types)
+
+# 🔒 Create fixed color mappings
+individual_palette <- RColorBrewer::brewer.pal(8, "Paired")
+individual_cols <- setNames(individual_palette[seq_along(all_individuals)],
+                            all_individuals)
+
+cell_type_palette <- RColorBrewer::brewer.pal(12, "Paired")
+cell_type_cols <- setNames(cell_type_palette[seq_along(all_cell_types)],
+                           all_cell_types)
+
+cross_ha <- columnAnnotation(
+  Individual = individual,
+  Cell_Type = cell_type,
+  Cell_Count = anno_barplot(cell_counts$Freq),
+  col = list(
+    Individual = individual_cols,
+    Cell_Type = cell_type_cols
+  ),
+  gp = gpar(fontsize = 7),
+  annotation_name_gp = gpar(fontsize = 7),
+  annotation_legend_param = list(
+    title = NULL,
+    labels = NULL
+  )
+)
+
+# Assign names to matrix
+rownames(cross_cor_mat) <- colnames(mean_df)
+colnames(cross_cor_mat) <- colnames(res_var_df)
+
+HCheat_mean_vs_var <- Heatmap(
+  cross_cor_mat,
+  top_annotation = ha,
+  name = "Correlation",
+  col = circlize::colorRamp2(
+    seq(-0.2, 0.2, length.out = 11),
+    inferno(11)
+  ),
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_row_dend = TRUE,
+  show_column_dend = TRUE,
+  column_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  row_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  heatmap_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical"
+  )
+) 
+draw(HCheat_mean_vs_var,heatmap_legend_side = "right")
+```
+## Supp S7
+```{r}
+perm_res_var <- read.csv(paste0(dir, "analysis/datasets/memento/new_res_var_by_cell_type_ind_permuted_new_pred_id.csv"), row.names = 1)
+```
+
+```{r}
+split_parts <- strsplit(colnames(perm_res_var), "_", fixed = TRUE)
+
+cormat <- cor(perm_res_var, method = "pearson")
+
+all_individuals <- c("NA19099", "NA19093", "NA18522")
+
+all_cell_types  <- c(
+  "Cardiomyocytes",
+  "Mesenchymal_cells",
+  "Cardiac_fibroblasts",
+  "Epithelial_cells",
+  "Activated_fibroblasts",
+  "Foregut_endodermal_cells"
+)
+
+# Extract metadata
+individual <- sapply(split_parts, `[`, 1)
+cell_type  <- sapply(split_parts, function(x) paste(x[-1], collapse = "_"))
+
+# 🔒 Force stable factor levels
+individual <- factor(individual, levels = all_individuals)
+cell_type  <- factor(cell_type,  levels = all_cell_types)
+
+# 🔒 Create fixed color mappings
+individual_palette <- RColorBrewer::brewer.pal(8, "Paired")
+individual_cols <- setNames(individual_palette[seq_along(all_individuals)],
+                            all_individuals)
+
+cell_type_palette <- RColorBrewer::brewer.pal(12, "Paired")
+cell_type_cols <- setNames(cell_type_palette[seq_along(all_cell_types)],
+                           all_cell_types)
+
+# --- Annotation ---
+ha <- columnAnnotation(
+  Individual = individual,
+  Cell_type  = cell_type,
+  col = list(
+    Individual = individual_cols,
+    Cell_type  = cell_type_cols
+  ),
+  gp = gpar(fontsize = 6, fontfamily = "Arial"),
+  annotation_name_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+  annotation_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical",
+    ncol = 1
+  )
+)
+
+# --- Heatmap ---
+HCheat <- Heatmap(
+  cormat,
+  top_annotation = ha,
+  name = "Correlation",
+  col = circlize::colorRamp2(
+    seq(0.8, 1, length.out = 11),
+    inferno(11)
+  ),
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  show_row_dend = FALSE,
+  show_column_dend = TRUE,
+  column_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  row_title_gp = gpar(fontsize = 7, fontfamily = "Arial"),
+  heatmap_legend_param = list(
+    title_gp  = gpar(fontsize = 6, fontfamily = "Arial"),
+    labels_gp = gpar(fontsize = 6, fontfamily = "Arial"),
+    direction = "vertical"
+  )
+)
+
+res_var_hm <- draw(
+  HCheat,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+
+res_var_hm
+```
+
+# Figure 3 and related supplementary figures
+## A
+```{r}
+###########################################
+# Find all eGenes across my cell types #
+###########################################
+all_egenes <- c()
+cts_included <- c()
+ct_egenes_count <- data.frame(cell_type = c(),
+                              egene_count = c())
+
+for (cell_type in cell_types){
+mat_egenes <- read_table(paste0("/project/gilad/emcintire/chemo_project_2023/pipeline/map_eqtls/archive/no_cvrt_condox_only/eqtl_results/Control/", cell_type, "/steadyState_", cell_type, "_Control_AllChroms.txt")) #uses readr function. regards all white space as delimiter
+
+# filter mat_egenes first to remove unsignificant hits, then for single genes
+mat_egenes <- mat_egenes %>%
+  dplyr::filter(bh_adj_pvalue <= 0.05)
+
+mat_egenes <- unique(mat_egenes$gene)
+
+# include if statement here to only include egenes from cell types with sufficient # egenes
+if (length(mat_egenes) >= 49){
+all_egenes <- c(all_egenes, mat_egenes)
+cts_included <- c(cts_included, cell_type)
+}
+
+ct_egenes_count <- rbind(ct_egenes_count, data.frame(cell_type = cell_type, egene_count = length(mat_egenes)))
+
+}
+
+all_egenes <- unique(all_egenes)
+cts_included
+```
+
+```{r}
+egenes_list <- list()
+cts_included <- c()
+
+for (cell_type in cell_types){
+
+  mat_egenes <- read_table(paste0("/project/gilad/emcintire/chemo_project_2023/pipeline/map_eqtls/archive/no_cvrt_condox_only/eqtl_results/Control/", cell_type, "/steadyState_", cell_type, "_Control_AllChroms.txt")) #uses readr function. regards all white space as delimiter
+
+  mat_egenes <- mat_egenes %>%
+    dplyr::filter(bh_adj_pvalue <= 0.05)
+
+  mat_egenes <- unique(mat_egenes$gene)
+
+  if (length(mat_egenes) >= 49){
+    egenes_list[[cell_type]] <- mat_egenes
+    cts_included <- c(cts_included, cell_type)
+  }
+}
+
+# Shared across ALL included cell types
+shared_egenes <- Reduce(intersect, egenes_list)
+```
+
+```{r}
+###########################################
+# Set Thresholds #
+###########################################
+tolerance <- 11847*0.15 #number of positions a gene can change in a cell type wrt global ranking and be kept
+
+n_quantiles <- 5 #number of bins to split genes into for fisher test
+
+###############################################
+# MAKE GLOBAL DISPERSION RANKING BY QUINTILES #
+###############################################
+## Rank median variability within cell types ...................
+
+ct_ranks_df <- as.data.frame(matrix(data = NA,
+                      nrow = length(rownames(res_var_df)),
+                      ncol = length(cell_types)))
+colnames(ct_ranks_df) <- cell_types
+rownames(ct_ranks_df) <- rownames(res_var_df)
+
+for (cell_type in cell_types){
+  # Build the column names for this cell type across all individuals
+  cols <- paste0(c("NA19099_", "NA19093_", "NA18522_"), cell_type)
+  
+  # Select those columns from res_var_df and take median value
+  ct_res_var <- res_var_df %>% dplyr::select(all_of(cols))
+  median_res_var <- data.frame(med_vals = apply(ct_res_var, 1, function(x) median(x)))
+  
+  # Rank from lowest to highest
+  ranks <- rank(median_res_var, ties.method = "average")
+  
+  # Fill into the right column (gene order is preserved)
+  ct_ranks_df[ , cell_type] <- ranks
+}
+
+## Find global ranking of ~commonly ranked genes across cell types ...................
+
+avg_rank <- rowMedians(as.matrix(ct_ranks_df))
+
+filtered_df <- ct_ranks_df[apply(abs(ct_ranks_df - avg_rank) <= tolerance, 1, all), ]
+
+global_ranks_df <- data.frame(global_rank = apply(filtered_df, 1, function(x) median(x)))
+global_ranks_df <- data.frame(global_rank = rank(global_ranks_df, ties.method = "average"))
+rownames(global_ranks_df) <- rownames(filtered_df)
+
+## Bin into however many bins ...................
+
+#n_quantiles <- 5
+
+decile_bins <- apply(global_ranks_df, 2, function(x) {
+  cut(x, 
+      breaks = quantile(x, probs = seq(0, 1, length.out = n_quantiles + 1), na.rm = TRUE), 
+      labels = FALSE, 
+      include.lowest = TRUE)
+})
+
+rownames(decile_bins) <- rownames(global_ranks_df)
+var_decile_df <- as.data.frame(decile_bins)
+var_decile_df <- var_decile_df %>%
+  rownames_to_column("gene")
+############################
+# FISHERS TEST IN EACH BIN #
+############################
+plot_df <- data.frame(quintile = as.integer(),
+                      egene_count = as.integer(),
+                      p.value = as.numeric(),
+                      log2OR = as.numeric(),
+                      log2_ci_lower = as.numeric(),
+                      log2_ci_upper = as.numeric())
+#i = 1
+for(i in seq_along(1:n_quantiles)){
+  var_decile_df$qoi <- var_decile_df$global_rank == i
+  
+  background_genes <- var_decile_df$gene
+  quint_genes <- var_decile_df$gene[var_decile_df$qoi == TRUE]
+  egenes <- intersect(all_egenes,background_genes)
+  
+  a <- length(intersect(egenes, quint_genes))
+  b <- length(setdiff(egenes, quint_genes))
+  c <- length(setdiff(quint_genes, egenes))
+  d <- length(setdiff(background_genes, union(egenes, quint_genes)))
+
+contingency <- matrix(
+  c(a, b, c, d),
+  nrow = 2,
+  byrow = TRUE,
+  dimnames = list(
+    egene = c("Yes", "No"),
+    quint_gene = c("In_Set", "Not_In_Set")
+  )
+)
+  
+  ft <- fisher.test(contingency)
+  egene_count <- a
+  
+  plot_df <- rbind(plot_df, 
+                   data.frame(quintile = i, 
+                              egene_count = egene_count, 
+                              p.value = ft[["p.value"]],
+                              OR = unname(ft$estimate),
+                              ci_lower = ft$conf.int[1],
+                              ci_upper = ft$conf.int[2],
+                              log2OR = log2(unname(ft$estimate)),
+                              log2_ci_lower = log2(ft$conf.int[1]),
+                              log2_ci_upper = log2(ft$conf.int[2])))
+}
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    quintile = factor(quintile, levels = sort(unique(quintile)))
+  )
+
+plot_df$padj <- p.adjust(plot_df$p.value, method = "BH")
+
+plot_df <- plot_df %>%
+  mutate(
+    label = ifelse(
+      quintile == levels(quintile)[1] & p.value < 0.05,
+      paste0("p = ", format(p.value, scientific = TRUE, digits = 2)),
+      NA
+    )
+  )
+
+plot <- ggplot(plot_df, aes(x = quintile, y = log2OR)) +
+
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = "grey40",
+    linewidth = 0.4
+  ) +
+
+  geom_errorbar(
+    aes(ymin = log2_ci_lower, ymax = log2_ci_upper),
+    width = 0.12,
+    linewidth = 0.4
+  ) +
+
+  geom_point(
+    aes(color = p.value < 0.05),
+    size = 1.8
+  ) +
+
+  geom_text(
+    aes(label = label),
+    position = position_nudge(y = 1),
+    size = 2,
+    family = "Arial"
+  ) +
+
+  scale_color_manual(
+    values = c("FALSE" = "black",
+               "TRUE"  = "#B22222"),   # deep firebrick red
+    guide = "none"
+  ) +
+
+  labs(
+    x = "Dispersion (global quintile rank)",
+    y = expression(log[2]("Odds ratio")),
+    title = "Enrichment of eGenes across dispersion quintiles"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+    axis.line = element_line(linewidth = 0.4),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm")
+  )
+
+plot
+```
+## B
+```{r}
+## genes in 1st and 5th quintile of variability in all cell types ...................
+var_first_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 1) >= 6) %>%
+  rownames(.)
+
+## genes in 1st quintile of variability in all cell types ...................
+var_fifth_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 5) >= 6) %>%
+  rownames(.)
+
+# flag genes that are in 1st  and 5th quintiles of variability
+plot_df <- data.frame(gene = rownames(var_quintile_dfs)) %>%
+  mutate(first_quint_var = gene %in% var_first_quint_genes) %>%
+  mutate(fifth_quint_var = gene %in% var_fifth_quint_genes)
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = c(fifth_quint_var, first_quint_var),
+    names_to = "quintile_group",
+    values_to = "is_member"
+  ) %>%
+  filter(is_member)  
+
+# Get all sheet names
+sheets <- excel_sheets(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S4.xlsx"))
+
+shared_TE_TE <- read_excel(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S4.xlsx"), sheet = sheets[10], col_names = TRUE)
+shared_TE_TE$rank <- as.integer(shared_TE_TE$rank)
+
+df <- data.frame(
+  genes = c(plot_long$gene[plot_long$quintile_group == "first_quint_var"], plot_long$gene[plot_long$quintile_group == "fifth_quint_var"])
+  #genes = never_first_fifth_genes
+)
+
+df <- df %>%
+  dplyr::filter(genes %in% shared_TE_TE$hub) %>%
+  dplyr::mutate(var_rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  #dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)]) %>%
+  #dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+  dplyr::mutate(hub_rank = shared_TE_TE$rank[match(genes, shared_TE_TE$hub)])
+
+# Ensure rank is treated as factor with correct order
+df$var_rank <- factor(df$var_rank, levels = c("1", "5"))
+
+ranked_hub_plot <- ggplot(df, aes(x = var_rank, y = hub_rank, fill = var_rank)) +
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Shared hub genes ranking"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+
+ranked_hub_plot
+```
+
+## C
+```{r}
+ct_specific_twn_percentage_func <- function(cell_type, sheet, percentage) {
+  # 1. Get the ct-specific rankings for cell type of interest
+  low <- percentage*length(rownames(ct_ranks_df))
+  high <- length(rownames(ct_ranks_df)) - percentage*length(rownames(ct_ranks_df))
+  
+  ## lowest dispersed genes of cell type ...................
+  low_disp <- ct_ranks_df %>%
+    dplyr::select(all_of(cell_type)) %>%
+    dplyr::filter(if_all(everything(), ~.x <= low)) %>%
+    rownames()
+  
+  ## highest dispersion genes of cell type
+  high_disp <- ct_ranks_df %>%
+    dplyr::select(all_of(cell_type)) %>%
+    dplyr::filter(if_all(everything(), ~.x >= high)) %>%
+    rownames()
+  
+  # 2. Load the TWN table
+  TE_TE <- readxl::read_excel(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S2.xlsx"), sheet = sheet, col_names = FALSE)
+  colnames(TE_TE) <- c("hub_name", "n_genes", "genes")
+  
+  # 3. Build dataframe containing only genes that are TWN hubs and are in 1st and 5th quintiles
+  df <- data.frame(
+    genes = c(low_disp, high_disp)
+    #genes = never_first_fifth_genes
+    )
+  
+  df <- df %>%
+    dplyr::filter(genes %in% TE_TE$hub_name) %>%
+    mutate(rank_category = case_when(
+    genes %in% low_disp  ~ "low",
+    genes %in% high_disp ~ "high"
+    )) %>%
+    #dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)]) %>%
+    #dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+    dplyr::mutate(n_genes = as.integer(TE_TE$n_genes[match(genes, TE_TE$hub_name)]))
+  
+  df$rank_category <- factor(df$rank_category, levels = c("low", "high"), ordered = TRUE)
+  
+  # 4. Plot
+  twn_hub_plot <- ggplot(df, aes(x = rank_category, y = n_genes, fill = rank_category)) +
+    
+    geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "low" = "steelblue",
+      "high" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "low" = "Low-dispersion\ngenes",
+      "high" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Connections per gene"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+  
+  return(twn_hub_plot)
+}
+
+# Get all sheet names
+sheets <- excel_sheets(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S2.xlsx"))
+```
+
+```{r}
+card_fib_results <- ct_specific_twn_percentage_func("Cardiac_fibroblasts", sheets[30], percentage = 0.3)
+card_fib_results
+
+card_results <- ct_specific_twn_percentage_func("Cardiomyocytes", sheets[34], percentage = 0.3)
+card_results
+```
+
+## D
+```{r}
+ppi <- read_tsv("/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/external_data/protein_interaction_data/interaction_consensus.tsv.zip")
+exp_evidence <- read_tsv("/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/external_data/protein_interaction_data/has_data_Tissue.tsv")
+
+ppi <- ppi %>%
+  dplyr::mutate(gene_1 = exp_evidence[match(ensembl_gene_id_1, exp_evidence$Ensembl), "Gene"]) %>%
+  dplyr::mutate(gene_2 = exp_evidence[match(ensembl_gene_id_2, exp_evidence$Ensembl), "Gene"])
+
+colnames(ppi) <- c("ensembl_gene_id_1","ensembl_gene_id_2","datasets","gene_1", "gene_2")
+
+connectivity <- as.data.frame(table(ppi$gene_1))
+
+# plot_long made in 3B
+
+df <- data.frame(
+  genes = c(plot_long$gene[plot_long$quintile_group == "first_quint_var"], plot_long$gene[plot_long$quintile_group == "fifth_quint_var"])
+  #genes = never_first_fifth_genes
+)
+
+df <- df %>%
+  dplyr::filter(genes %in% connectivity$Gene) %>%
+  dplyr::mutate(var_rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  #dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)]) %>%
+  #dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+  dplyr::mutate(int_count = connectivity$Freq[match(genes, connectivity$Gene)])
+
+# Ensure rank is treated as factor with correct order
+df$var_rank <- factor(df$var_rank, levels = c("1", "5"))
+
+protein_int_plot <- ggplot(df, aes(x = var_rank, y = int_count, fill = var_rank)) +
+  
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Protein connections per gene"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+
+protein_int_plot
+```
+
+## Supp S8
+```{r}
+window_size <- 1500
+step_size <- 100
+
+cell_types <- c("Cardiomyocytes", "Cardiac_fibroblasts", "Activated_fibroblasts", "Foregut_endodermal_cells")
+cell_type <- "Cardiomyocytes"
+plots <- list()
+cell_type <- cell_types[1]
+for (cell_type in cell_types){
+  # read in eGenes for this cell type
+  egenes <- read_table(paste0("/project/gilad/emcintire/chemo_project_2023/pipeline/map_eqtls/archive/no_cvrt_condox_only/eqtl_results/Control/", cell_type, "/steadyState_", cell_type, "_Control_AllChroms.txt")) #uses readr function. regards all white space as delimiter
+  
+  egenes <- egenes %>%
+    dplyr::filter(bh_adj_pvalue <= 0.05)
+  # Build the column names for this cell type across all individuals
+  cols <- paste0(c("NA19099_", "NA19093_", "NA18522_"), cell_type)
+  
+  # Select those columns from res_var_df and take median value
+  ct_res_var <- res_var_df %>% dplyr::select(all_of(cols))
+  median_res_var <- data.frame(med_vals = apply(ct_res_var, 1, function(x) median(x)))
+  
+  # subset egenes dataframe to only include genes represented in ct_res_var
+  egenes <- egenes[egenes$gene %in% rownames(ct_res_var),]
+  egenes <- unique(egenes$gene)
+  
+  # Rank from lowest to highest (change decreasing=TRUE if needed)
+  rank_df <- apply(median_res_var, 2, function(x) rank(x, ties.method = "average"))
+  
+  # Initialize output
+  results <- data.frame(start = integer(), end = integer(), proportion_egenes = numeric(), genes_in_window = integer(), egenes_in_window = integer())
+  
+  # Get total number of genes to define maximum rank
+  max_rank <- nrow(rank_df)
+  
+  # Sliding window loop
+  for (start in seq(1, max_rank - window_size + 1, by = step_size)) {
+    end <- start + window_size - 1
+    
+    # Identify genes ranked within [start, end] in all 3 individuals
+    in_window <- apply(rank_df, 1, function(ranks) all(ranks >= start & ranks <= end))
+    genes_in_all <- rownames(rank_df)[in_window]
+    
+    # Count eGenes in that set
+    num_egenes <- sum(genes_in_all %in% egenes)
+    proportion <- if (length(genes_in_all) > 0) num_egenes / length(genes_in_all) else NA
+    #beta_mean <- mean(egenes$beta[egenes$gene %in% genes_in_all])
+    
+    # Store results
+    results <- rbind(results, data.frame(start = start, end = end, proportion_egenes = proportion, genes_in_window = length(genes_in_all), egenes_in_window = num_egenes))
+  }
+  
+  results$midpoint <- (results$start + results$end) / 2
+  
+  # Set parameters for generation of null distribution
+  set.seed(123)
+  n_permutations <- 15
+  
+  # Store all null proportions: rows = permutations, columns = windows
+  n_windows <- nrow(results)
+  null_matrix <- matrix(NA, nrow = n_permutations, ncol = n_windows)
+  
+  # Precompute eligible gene set
+  all_genes <- rownames(rank_df)
+  
+  for (i in 1:n_permutations) {
+    # Random "eGenes"
+    random_egenes <- sample(all_genes, length(egenes), replace = FALSE)
+    tmp_results <- c()
+    
+    for (w in seq_len(n_windows)) {
+      start <- results$start[w]
+      end <- results$end[w]
+      
+      # Which genes are ranked within this window for ALL 3 individuals?
+      in_window <- apply(rank_df, 1, function(ranks) all(ranks >= start & ranks <= end))
+      genes_in_all <- rownames(rank_df)[in_window]
+      
+      if (length(genes_in_all) > 0) {
+        prop <- sum(genes_in_all %in% random_egenes) / length(genes_in_all)
+        } else {
+          prop <- NA
+          }
+      tmp_results <- c(tmp_results, prop)
+      }
+    null_matrix[i, ] <- tmp_results
+    }
+  
+  # Compute null mean and 95% CI for each window
+  results$null_mean <- colMeans(null_matrix, na.rm = TRUE)
+  results$null_lower <- apply(null_matrix, 2, quantile, probs = 0.025, na.rm = TRUE)
+  results$null_upper <- apply(null_matrix, 2, quantile, probs = 0.975, na.rm = TRUE)
+  
+  # Rescale mean expression to fit within the 0–0.6 y-axis range
+ # prop_min <- min(results$proportion_egenes)
+ # prop_max <- max(results$proportion_egenes)
+  #expr_min <- min(egenes$beta)
+  #expr_max <- max(egenes$beta)
+  
+  #prop_min <- 0
+  #prop_max <- 0.015
+  #expr_min <- -3
+  #expr_max <- 3
+  
+  # This rescales to proportion scale for plotting
+  #results$mean_beta_window_rescaled <- prop_min + 
+   # (results$mean_beta_window - expr_min) * (prop_max - prop_min) / (expr_max - expr_min)
+  
+  ### ORIGINAL PLOT
+  plot <- ggplot(results, aes(x = midpoint, y = proportion_egenes)) +
+    geom_line(color = "red", size = 0.6) +
+    geom_ribbon(aes(ymin = null_lower, ymax = null_upper), fill = "gray80", alpha = 0.5) +
+    geom_line(aes(y = null_mean), linetype = "dashed", color = "black") +
+    ylim(0, 0.02) +
+    labs(
+      x = NULL,
+      y = NULL,
+      title = paste0(cell_type)
+      ) +
+    theme(title = element_text(size = 6)) +
+    theme_classic(base_family = "Arial") +
+    theme(
+    text = element_text(size = 6),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+    axis.line = element_line(linewidth = 0.4),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+    panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  ))
+  
+  # Display y axis for specific plots
+    if (cell_type == "Cardiomyocytes" | cell_type == "Activated_fibroblasts") {
+      plot <- plot + theme(axis.text.y = element_text(size = 6),
+                           axis.title.y = element_text(size = 7, angle = 90)) +
+        labs(y = "Proportion of eGenes")
+      }
+    
+    # Display x axis text and x axis title for specific plots
+    if (cell_type == "Activated_fibroblasts" | cell_type == "Foregut_endodermal_cells") {
+      plot <- plot + theme(axis.text.x = element_text(size = 6),
+                           axis.title.x = element_text(size = 7)) +
+        labs(x = "Rank Window Midpoint")
+    }
+  plots[[cell_type]] <- plot
+}
+
+# Combine all plots into a single grid with 3 columns
+combined_plot <- wrap_plots(plots) + 
+  plot_layout(ncol = 2, axis_titles = "collect")
+```
+
+## Supp S9
+```{r}
+##################################
+# READ IN LFSR and premash betas #
+##################################
+lfsr <- read.csv(paste0(dir, "analysis/datasets/erik_egenes/mash_qtl_lfsr_05"), row.names = 1)
+
+premash_beta <- read.csv(paste0(dir, "analysis/datasets/erik_egenes/premash_betas"), row.names = 1)
+
+window_size <- 3000
+step_size <- 100
+
+# Set LFSR threshold for eQTL significance
+lfsr_thresh <- 0.05
+
+plots <- list()
+
+for (cell_type in cell_types){
+  # From the lfsr dataframe, select the control columns, then filter by lfsr threshold for get sig egenes
+  lfsr_col <- paste0(cell_type, "_Control_lfsr")
+  beta_col <- paste0(cell_type, "_Control_premash_beta")
+  egenes <- lfsr %>%
+    rownames_to_column("gene") %>%
+    filter(lfsr[[lfsr_col]] < lfsr_thresh) %>%
+    dplyr::select(gene, all_of(lfsr_col))
+  
+  # Filter the beta df by the egenes in lfsr
+  ct_beta <- premash_beta %>%
+    filter(rownames(.) %in% egenes$gene) %>%
+    rownames_to_column("gene") %>%
+    dplyr::select(gene, all_of(beta_col))
+  
+  # Build the column names for this cell type across all individuals
+  cols <- paste0(c("NA19099_", "NA19093_", "NA18522_"), cell_type)
+  
+  # Select those columns from res_var_df and take median value
+  ct_res_var <- res_var_df %>% dplyr::select(all_of(cols))
+  median_res_var <- data.frame(med_vals = apply(ct_res_var, 1, function(x) median(x)))
+  
+  # subset egenes dataframe to only include genes represented in ct_res_var
+  egenes <- egenes[egenes$gene %in% rownames(ct_res_var),]
+  ct_beta <- ct_beta[ct_beta$gene %in% egenes$gene,]
+  
+  # Rank from lowest to highest (change decreasing=TRUE if needed)
+  rank_df <- apply(median_res_var, 2, function(x) rank(x, ties.method = "average"))
+  
+  # Initialize output
+  results <- data.frame(start = integer(), end = integer(), genes_in_window = integer(), proportion_egenes = numeric(), egenes_in_window = integer(), median_beta_in_window = integer())
+  
+  # Get total number of genes to define maximum rank
+  max_rank <- nrow(rank_df)
+  
+  # Sliding window loop
+  for (start in seq(1, max_rank - window_size + 1, by = step_size)) {
+    end <- start + window_size - 1
+    
+    # Identify genes ranked within [start, end] in all 3 individuals
+    in_window <- apply(rank_df, 1, function(ranks) all(ranks >= start & ranks <= end))
+    genes_in_all <- rownames(rank_df)[in_window]
+    
+    # Count mean beta in that set
+    median_beta <- median(abs(ct_beta[[beta_col]][ct_beta$gene %in% genes_in_all]))
+    num_egenes <- sum(genes_in_all %in% egenes$gene)
+    proportion <- if (length(genes_in_all) > 0) num_egenes / length(genes_in_all) else NA
+    
+    # Store results
+    results <- rbind(results, data.frame(start = start, end = end, genes_in_window = length(genes_in_all), proportion_egenes = proportion, egenes_in_window = num_egenes, median_beta_in_window = median_beta))
+  }
+  
+  results$midpoint <- (results$start + results$end) / 2
+  
+  # Set parameters for generation of null distribution
+  set.seed(123)
+  n_permutations <- 15
+  
+  # Store all null proportions: rows = permutations, columns = windows
+  n_windows <- nrow(results)
+  null_matrix <- matrix(NA, nrow = n_permutations, ncol = n_windows)
+  
+  # Precompute eligible gene set
+  all_genes <- rownames(rank_df)
+  
+  for (i in 1:n_permutations) {
+    # Random "eGenes"
+    random_egenes <- sample(all_genes, length(egenes$gene), replace = FALSE)
+    tmp_results <- c()
+    
+    for (w in seq_len(n_windows)) {
+      start <- results$start[w]
+      end <- results$end[w]
+      
+      # Which genes are ranked within this window for ALL 3 individuals?
+      in_window <- apply(rank_df, 1, function(ranks) all(ranks >= start & ranks <= end))
+      genes_in_all <- rownames(rank_df)[in_window]
+      
+      if (length(genes_in_all) > 0) {
+        prop <- sum(genes_in_all %in% random_egenes) / length(genes_in_all)
+        } else {
+          prop <- NA
+          }
+      tmp_results <- c(tmp_results, prop)
+      }
+    null_matrix[i, ] <- tmp_results
+    }
+  
+  # Compute null mean and 95% CI for each window
+  results$null_mean <- colMeans(null_matrix, na.rm = TRUE)
+  results$null_lower <- apply(null_matrix, 2, quantile, probs = 0.025, na.rm = TRUE)
+  results$null_upper <- apply(null_matrix, 2, quantile, probs = 0.975, na.rm = TRUE)
+  
+  # Rescale mean expression to fit within the 0–0.6 y-axis range
+ # prop_min <- min(results$proportion_egenes)
+ # prop_max <- max(results$proportion_egenes)
+  #expr_min <- min(egenes$beta)
+  #expr_max <- max(egenes$beta)
+  
+  prop_min <- 0.04
+  prop_max <- 0.15
+  beta_min <- .3
+  beta_max <- .7
+  
+  # This rescales to proportion scale for plotting
+  results$median_beta_in_window_rescaled <- prop_min + 
+    (results$median_beta_in_window - beta_min) * (prop_max - prop_min) / (beta_max - beta_min)
+  
+  plot <- ggplot(results, aes(x = midpoint)) +
+    # eGene proportion (primary axis)
+    
+    geom_line(
+      aes(y = proportion_egenes),
+      color = "red",
+      linewidth = 0.6
+      ) +
+    
+    geom_ribbon(aes(ymin = null_lower, ymax = null_upper), fill = "gray80", alpha = 0.5) +
+    
+    geom_line(aes(y = null_mean), linetype = "dashed", color = "black") +
+    
+    # Effect size (rescaled, secondary axis)
+    
+    # geom_line(
+    #   aes(y = median_beta_in_window_rescaled),
+    #   color = "blue",
+    #   linewidth = 1.2,
+    #   linetype = "dashed"
+    #   ) +
+    
+    scale_y_continuous(
+      name = "eGene proportion"
+      # sec.axis = sec_axis(
+      #   ~ beta_min + (. - prop_min) * (beta_max - beta_min) / (prop_max - prop_min),
+      #   name = "Median |effect size| (beta)"
+      #   )
+      ) +
+    
+    labs(
+      x = NULL,
+      y = NULL,
+      title = cell_type
+      ) +
+    
+    theme(title = element_text(size = 6)) +
+    theme_classic(base_family = "Arial") +
+    
+    theme(
+    text = element_text(size = 6),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    plot.title = element_text(size = 6, hjust = 0.5),
+    axis.line = element_line(linewidth = 0.4),
+    plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+    panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  ))
+  
+  # Display y axis for specific plots
+    if (cell_type == "Cardiomyocytes" | cell_type == "Epithelial_cells") {
+      plot <- plot + theme(axis.text.y = element_text(size = 6),
+                           axis.title.y = element_text(size = 7, angle = 90)) +
+        labs(y = "Proportion of eGenes")
+      }
+    
+    # Display x axis text and x axis title for specific plots
+    if (cell_type == "Epithelial_cells" | cell_type == "Activated_fibroblasts" | cell_type == "Foregut_endodermal_cells") {
+      plot <- plot + theme(axis.text.x = element_text(size = 6),
+                           axis.title.x = element_text(size = 7)) +
+        labs(x = "Rank Window Midpoint")
+    }
+  plots[[cell_type]] <- plot
+}
+
+# Combine all plots into a single grid with 3 columns
+combined_plot <- wrap_plots(plots) + 
+  plot_layout(ncol = 3, axis_titles = "collect")
+```
+
+## Supp S10
+```{r}
+ct_specific_twn_percentage_func <- function(cell_type, sheet, percentage) {
+  # 1. Get the ct-specific rankings for cell type of interest
+  low <- percentage*length(rownames(ct_ranks_df))
+  high <- length(rownames(ct_ranks_df)) - percentage*length(rownames(ct_ranks_df))
+  
+  ## lowest dispersed genes of cell type ...................
+  low_disp <- ct_ranks_df %>%
+    dplyr::select(all_of(cell_type)) %>%
+    dplyr::filter(if_all(everything(), ~.x <= low)) %>%
+    rownames()
+  
+  ## highest dispersion genes of cell type
+  high_disp <- ct_ranks_df %>%
+    dplyr::select(all_of(cell_type)) %>%
+    dplyr::filter(if_all(everything(), ~.x >= high)) %>%
+    rownames()
+  
+  # 2. Load the TWN table
+  TE_TE <- readxl::read_excel(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S2.xlsx"), sheet = sheet, col_names = FALSE)
+  colnames(TE_TE) <- c("hub_name", "n_genes", "genes")
+  
+  # 3. Build dataframe containing only genes that are TWN hubs and are in 1st and 5th quintiles
+  df <- data.frame(
+    genes = c(low_disp, high_disp)
+    #genes = never_first_fifth_genes
+    )
+  
+  df <- df %>%
+    dplyr::filter(genes %in% TE_TE$hub_name) %>%
+    mutate(rank_category = case_when(
+    genes %in% low_disp  ~ "low",
+    genes %in% high_disp ~ "high"
+    )) %>%
+    #dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)]) %>%
+    #dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+    dplyr::mutate(n_genes = as.integer(TE_TE$n_genes[match(genes, TE_TE$hub_name)]))
+  
+  df$rank_category <- factor(df$rank_category, levels = c("low", "high"), ordered = TRUE)
+  
+  # 4. Plot
+  twn_hub_plot <- ggplot(df, aes(x = rank_category, y = n_genes, fill = rank_category)) +
+    
+    geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "low" = "steelblue",
+      "high" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "low" = "Low-dispersion\ngenes",
+      "high" = "High-dispersion\ngenes"
+    )
+  ) +
+    
+    scale_y_continuous(
+      limits = c(0,80)
+    ) +
+
+  labs(
+    x = NULL,
+    y = "Connections per gene"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+  
+  return(twn_hub_plot)
+}
+
+# Get all sheet names
+sheets <- excel_sheets(paste0(dir, "analysis/datasets/external_data/saha_coexp_net_TWN_2017/Supplemental_Data_S2.xlsx"))
+```
+
+```{r}
+# change percentage parameter between 0.1 and 0.2
+card_fib_results <- ct_specific_twn_percentage_func("Cardiac_fibroblasts", sheets[30], percentage = 0.1)
+card_fib_results
+
+card_results <- ct_specific_twn_percentage_func("Cardiomyocytes", sheets[34], percentage = 0.1)
+card_results
+```
+
+# Figure 4 and related supplementary figures
+## A
+```{r}
+de_dream_obj <- readRDS(paste0(dir, "analysis/first_pub_datasets/quan_norm_mean_new_predicted_id_std_lm_dream.rds"))
+
+## genes in 1st quintile of variability in all cell types ...................
+var_first_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 1) >= 6) %>%
+  rownames(.)
+
+## genes in 5th quintile of variability in all cell types ...................
+var_fifth_quint_genes <- var_quintile_dfs %>%
+  dplyr::filter(rowSums(. == 5) == 6) %>%
+  rownames(.)
+
+```
+
+```{r}
+fc_thresh <- 0
+# Extract contrast coefficient names
+contrast_coefs <- colnames(de_dream_obj$coefficients)[1:15]
+
+contrast_DE <- matrix(data = NA, nrow = length(rownames(de_dream_obj$coefficients)), ncol = length(colnames(de_dream_obj$coefficients)[1:15]))
+
+colnames(contrast_DE) <- colnames(de_dream_obj$coefficients)[1:15]
+rownames(contrast_DE) <- rownames(de_dream_obj$coefficients)
+
+contrast_DE <- as.data.frame(contrast_DE)
+
+for(contrast in contrast_coefs){
+  res_sum_table <- topTable(de_dream_obj, coef = contrast, number = Inf, sort.by = "none")
+  
+  contrast_DE[[contrast]] <- res_sum_table$adj.P.Val <= 0.05 & abs(res_sum_table$logFC) >= fc_thresh
+}
+```
+
+```{r}
+df <- data.frame(
+  genes = c(var_first_quint_genes, var_fifth_quint_genes)
+)
+
+df <- df %>%
+  dplyr::mutate(rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  dplyr::mutate(DE_count = rowSums(contrast_DE[match(genes, rownames(contrast_DE)), ]))
+
+# Ensure rank is treated as factor with correct order
+df$rank <- factor(df$rank, levels = c("1", "5"))
+
+p_de <- ggplot(df, aes(x = rank, y = DE_count, fill = rank)) +
+
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "DE count per gene"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+
+p_de
+
+```
+
+## B
+```{r}
+epd_tata <- read.table("/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/external_data/epd/human_epdnew_3sa0y.bed", sep = "\t", header = FALSE)
+
+# rename columns
+colnames(epd_tata) <- c("chr", "start", "end", "promoter_id", "score", "strand")
+
+# make new column indicating gene
+epd_tata <- epd_tata %>%
+  dplyr::mutate(
+    gene = sub("_[0-9]+$", "", promoter_id)
+  ) %>%
+  dplyr::mutate(
+    promoter_number = as.integer(sub("^.*_", "", promoter_id))
+    )
+
+tata_enrich_func <- function(target_genes){
+  background_genes <- rownames(var_quintile_dfs)
+  tata_genes <- intersect(unique(epd_tata$gene),background_genes)
+  
+  a <- length(intersect(tata_genes, target_genes))
+  b <- length(setdiff(tata_genes, target_genes))
+  c <- length(setdiff(target_genes, tata_genes))
+  d <- length(setdiff(background_genes, union(tata_genes, target_genes)))
+  
+  contingency <- matrix(
+    c(a, b, c, d),
+    nrow = 2,
+    byrow = TRUE,
+    dimnames = list(
+      TATA = c("Yes", "No"),
+      Target = c("In_Set", "Not_In_Set")
+      )
+    )
+  ft <- fisher.test(contingency)
+  return(ft)
+}
+
+# Fisher's exact TEST
+# will use the first, fifth, and never gene sets as the target gene set
+background_genes <- rownames(var_quintile_dfs)
+target_genes <- var_first_quint_genes
+tata_genes <- intersect(unique(epd_tata$gene),background_genes)
+
+a <- length(intersect(tata_genes, target_genes))
+b <- length(setdiff(tata_genes, target_genes))
+c <- length(setdiff(target_genes, tata_genes))
+d <- length(setdiff(background_genes, union(tata_genes, target_genes)))
+
+contingency <- matrix(
+  c(a, b, c, d),
+  nrow = 2,
+  byrow = TRUE,
+  dimnames = list(
+    TATA = c("Yes", "No"),
+    Target = c("In_Set", "Not_In_Set")
+  )
+)
+
+contingency
+
+#chisq.test(contingency)
+ft <- fisher.test(contingency)
+ft$conf.int
+```
+
+```{r}
+plot_df <- data.frame(
+  gene_set = c("low_disp", "high_disp"),
+  odd_ratio = as.numeric(NA, NA),
+  ci_lower = as.numeric(NA,NA),
+  ci_upper = as.numeric(NA,NA),
+  p_val = as.numeric(NA,NA)
+)
+
+low_ft <- tata_enrich_func(var_first_quint_genes)
+high_ft <- tata_enrich_func(var_fifth_quint_genes)
+
+# low dispersion genes OR value and CIs
+plot_df[1,2] <- as.numeric(low_ft$estimate)
+plot_df[1, 3:4] <- c(low_ft$conf.int[1], low_ft$conf.int[2])
+plot_df[1,5] <- as.numeric(low_ft$p.value)
+
+# high dispersion genes OR value and CIs
+plot_df[2,2] <- as.numeric(high_ft$estimate)
+plot_df[2, 3:4] <- c(high_ft$conf.int[1], high_ft$conf.int[2])
+plot_df[2,5] <- as.numeric(high_ft$p.value)
+
+plot_df$p_label <- ifelse(
+  plot_df$p_val < 2e-16,
+  paste0("p = <2e-16 "),
+  paste0("p = ", formatC(plot_df$p_val, format = "e", digits = 2))
+)
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    log2_or = log2(odd_ratio),
+    log2_ci_lower = log2(ci_lower),
+    log2_ci_upper = log2(ci_upper)
+  )
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    gene_set = factor(
+      gene_set,
+      levels = c("low_disp", "high_disp")
+    )
+  )
+
+p_tata <- ggplot(plot_df, aes(x = gene_set, y = log2_or)) +
+
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.4,
+    color = "grey40"
+  ) +
+
+  geom_errorbar(
+    aes(ymin = log2_ci_lower, ymax = log2_ci_upper),
+    width = 0.15,
+    linewidth = 0.4
+  ) +
+
+  geom_point(size = 1.6) +
+
+  geom_text(
+    aes(
+      y = log2_ci_upper,
+      label = p_label
+    ),
+    vjust = -0.6,
+    size = 2,
+    family = "Arial"
+  ) +
+  
+  scale_x_discrete(
+    labels = c(
+      "low_disp" = "Low-dispersion\ngenes",
+      "high_disp" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = expression(log[2]("Odds ratio"))
+  ) +
+
+  theme_classic(base_family = "Arial") +
+
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.line = element_line(linewidth = 0.4),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.4
+    ),
+    legend.position = "none",
+    plot.margin = margin(2, 2, 2, 2, unit = "mm")
+  )
+
+p_tata
+```
+
+## C
+```{r}
+tss_usage <- read.csv(paste0("/project2/gilad/wenhe/cox_baboon_diet/combined_analysis/gene_annotation/fantom/short_descrip_split_gene_only.txt"), header = FALSE)
+
+tss_df <- as.data.frame(table(tss_usage$V1))
+
+tss_df <- tss_df %>%
+  dplyr::filter(Var1 %in% rownames(res_var_df))
+
+df <- data.frame(
+  genes = c(var_first_quint_genes, var_fifth_quint_genes)
+)
+
+df <- df %>%
+  dplyr::mutate(rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+
+# Ensure rank is treated as factor with correct order
+df$rank <- factor(df$rank, levels = c("1", "5"))
+
+plot <- ggplot(df, aes(x = rank, y = tss_count, fill = rank)) +
+  
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "TSS count"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+
+plot
+```
+
+```{r}
+ABC_pred <- read_table(paste0("/project2/gilad/wenhe/cox_baboon_diet/combined_analysis/gene_annotation/ABC_prediction_score005.txt")) #uses readr function. regards all white space as delimiter
+
+abc_df <- ABC_pred %>% 
+  dplyr::filter(TargetGene %in% rownames(res_var_df))
+
+df <- data.frame(
+  genes = c(var_first_quint_genes, var_fifth_quint_genes)
+)
+
+df <- df %>%
+  dplyr::filter(genes %in% abc_df$TargetGene) %>%
+  dplyr::mutate(rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)])
+
+# Ensure rank is treated as factor with correct order
+df$rank <- factor(df$rank, levels = c("1", "5"))
+
+enh_plot <- ggplot(df, aes(x = rank, y = enh_length, fill = rank)) +
+  
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Accum. enhancer length\n(per tissue/cell type)"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+  
+enh_plot
+```
+
+```{r}
+mart <- useEnsembl("ensembl",dataset="hsapiens_gene_ensembl")
+
+## get MANE select transcripts and other information, then filter for your genes
+BM.mane <- getBM(
+  attributes = c(
+    "ensembl_gene_id",
+    "ensembl_transcript_id",
+    "hgnc_symbol",
+    "transcript_mane_select",
+    "refseq_mrna"
+  ),
+  filters = "mane_select",
+  values = TRUE,       # TRUE returns only MANE Select transcripts
+  mart = mart
+)
+
+BM.mane <- subset(BM.mane, hgnc_symbol %in% rownames(ct_ranks_df))
+
+## get the ensembl_transcript_id here to subset for the exon dataset, then make the exon dataset
+transcript_ids <- unique(BM.mane$ensembl_transcript_id)
+exon.info <- getBM(attributes=c("ensembl_gene_id", "ensembl_transcript_id", "ensembl_exon_id", "exon_chrom_start", "exon_chrom_end"),
+                   filters = "ensembl_transcript_id",
+                   values = transcript_ids,
+                   mart=mart)
+
+exon.info <- exon.info %>%
+  left_join(BM.mane %>% dplyr::select(ensembl_transcript_id, hgnc_symbol, transcript_mane_select),
+            by = "ensembl_transcript_id")
+
+## count exons per transcript
+exon_counts <- exon.info %>%
+  group_by(ensembl_transcript_id, ensembl_gene_id) %>%
+  summarise(num_exons = n_distinct(ensembl_exon_id)) %>%
+  ungroup()
+
+## add introns (subtract 1 from exon count)
+exon_counts <- exon_counts %>%
+  mutate(num_introns = num_exons - 1)
+
+## add back in the hgnc symbol column from BM.info.canon
+BM.mane.unique <- BM.mane %>%
+  distinct(ensembl_transcript_id, hgnc_symbol)
+
+exon_counts <- exon_counts %>%
+  left_join(BM.mane.unique %>% dplyr::select(ensembl_transcript_id, hgnc_symbol),
+            by = "ensembl_transcript_id")
+
+exon_counts_ordered <- exon_counts %>%
+  arrange(desc(num_exons))
+```
+
+```{r}
+df <- data.frame(
+  genes = c(var_first_quint_genes, var_fifth_quint_genes)
+  #genes = never_first_fifth_genes
+)
+
+df <- df %>%
+  dplyr::filter(genes %in% exon_counts$hgnc_symbol) %>%
+  dplyr::mutate(var_rank = var_quintile_dfs[match(genes, rownames(var_quintile_dfs)), "Cardiomyocytes"]) %>%
+  #dplyr::mutate(enh_length = abc_df$avg_length_across_celltype[match(genes, abc_df$TargetGene)]) %>%
+  #dplyr::mutate(tss_count = tss_df$Freq[match(genes, tss_df$Var1)])
+  dplyr::mutate(exon_count = exon_counts$num_exons[match(genes, exon_counts$hgnc_symbol)]) %>%
+  dplyr::mutate(intron_count = exon_counts$num_introns[match(genes, exon_counts$hgnc_symbol)])
+
+df <- df %>%
+  arrange(desc(exon_count))
+
+# Ensure rank is treated as factor with correct order
+df$rank <- factor(df$var_rank, levels = c("1", "5"))
+
+intron_plot <- ggplot(df, aes(x = rank, y = intron_count, fill = rank)) +
+  
+  geom_boxplot(
+    width = 0.6,
+    linewidth = 0.4,
+    outlier.shape = NA
+  ) +
+
+  geom_jitter(
+    width = 0.15,
+    size = 0.6,
+    alpha = 0.4
+  ) +
+
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 2
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "1" = "steelblue",
+      "5" = "coral"
+    )
+  ) +
+
+  scale_x_discrete(
+    labels = c(
+      "1" = "Low-dispersion\ngenes",
+      "5" = "High-dispersion\ngenes"
+    )
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Intron count"
+  ) +
+
+  theme_classic(base_family = "Arial") +
+  theme(
+  text = element_text(size = 6),
+  axis.title = element_text(size = 6),
+  axis.text = element_text(size = 6),
+  axis.line = element_line(linewidth = 0.4),
+  axis.text.x = element_text(hjust = 0.5),
+  legend.position = "none",
+  plot.margin = margin(2, 2, 2, 2, unit = "mm"),
+  panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    linewidth = 0.4
+  )
+)
+  
+intron_plot
+```
