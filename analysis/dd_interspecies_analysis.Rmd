@@ -856,7 +856,6 @@ lof_scores <- lof_scores %>% filter(mane_select == "true")
 
 We compare the loss of function in cis and trans genes. We use our overall definition of cis/trans genes by looking at mean cis proportion of cell type DD and determine cis (>0.7) or trans (<0.3).
 ```{r}
-###### Plot
 plot_df2 <- dd_results %>%
   dplyr::select(gene, dd.cis.category.overall) %>%
   dplyr::inner_join(
@@ -864,10 +863,11 @@ plot_df2 <- dd_results %>%
       dplyr::select(gene, lof.oe),
     by = "gene"
   ) %>%
+  dplyr::filter(dd.cis.category.overall != "not DD") %>%
   dplyr::mutate(
     cat = factor(
       as.character(dd.cis.category.overall),
-      levels = c("cis", "neither", "mixed", "trans", "not DD")
+      levels = c("cis", "neither", "mixed", "trans")
     )
   )
 
@@ -903,8 +903,7 @@ p_lof <- ggplot(plot_df2, aes(x = cat, y = lof.oe, fill = cat)) +
     "cis"     = "#009E73",
     "trans"   = "#D55E00",
     "neither" = "#0072B2",
-    "mixed"   = "#CC79A7",
-    "not DD"  = "grey70"
+    "mixed"   = "#CC79A7"
   )) +
   labs(x = "", y = "LOEUF") +
   ggpubr::theme_pubr() +
@@ -924,8 +923,7 @@ p_lof <- ggplot(plot_df2, aes(x = cat, y = lof.oe, fill = cat)) +
     "cis"     = expression(italic("cis")),
     "trans"   = expression(italic("trans")),
     "neither" = "neither",
-    "mixed"   = "mixed",
-    "not DD"  = "not DD"
+    "mixed"   = "mixed"
   ))
 
 p_lof
@@ -947,7 +945,7 @@ lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
         is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
         dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
         dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
-        TRUE                                                ~ "neither"
+        TRUE                                             ~ "neither"
       )
     ) %>%
     dplyr::inner_join(
@@ -955,18 +953,19 @@ lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
         dplyr::select(gene, lof.oe),
       by = "gene"
     ) %>%
+    dplyr::filter(combined_category != "not DD") %>%
     dplyr::mutate(
       cat = factor(
         combined_category,
-        levels = c("cis", "neither", "trans", "not DD")
+        levels = c("cis", "neither", "trans")
       )
     )
 
   # Wilcoxon: cis vs trans
   pval <- plot_df2 %>%
-  dplyr::filter(cat %in% c("cis", "trans")) %>%
-  dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
-  dplyr::pull(p)
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
+    dplyr::pull(p)
 
   p_label <- paste0(
     "p < ",
@@ -976,40 +975,38 @@ lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
   y_pos <- min(1.75, max(plot_df2$lof.oe, na.rm = TRUE) * 1.12)
   h <- 0.05
 
-p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
-  ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+  p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
 
-  # bracket spanning cis (1) to trans (3)
-  ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
-  ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
-  ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    # bracket spanning cis (1) to trans (3)
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
 
-  ggplot2::scale_fill_manual(values = c(
-    "cis"     = "#009E73",
-    "trans"   = "#D55E00",
-    "neither" = "#0072B2",
-    "not DD"  = "grey70"
-  )) +
-  ggplot2::labs(x = "", y = "LOEUF") +
-  ggpubr::theme_pubr() +
-  ggplot2::theme(
-    axis.line = ggplot2::element_blank(),
-    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
-    panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
-    panel.grid.minor.y = ggplot2::element_blank(),
-    panel.grid.major.x = ggplot2::element_blank(),
-    panel.grid.minor.x = ggplot2::element_blank(),
-    legend.position = "none",
-    axis.title = ggplot2::element_text(size = 14),
-    axis.text = ggplot2::element_text(size = 12)
-  ) +
-  ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
-  ggplot2::scale_x_discrete(labels = c(
-    "cis"     = expression(italic("cis")),
-    "trans"   = expression(italic("trans")),
-    "neither" = "neither",
-    "not DD"  = "not DD"
-  ))
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "trans"   = "#D55E00",
+      "neither" = "#0072B2"
+    )) +
+    ggplot2::labs(x = "", y = "LOEUF") +
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
+    ggplot2::scale_x_discrete(labels = c(
+      "cis"     = expression(italic("cis")),
+      "trans"   = expression(italic("trans")),
+      "neither" = "neither"
+    ))
 
   # add p-value label conditionally
   if (pval >= 1e-4) {
@@ -1033,7 +1030,7 @@ p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)
       )
   }
 
-return(p_lof)
+  return(p_lof)
 }
 ```
 
@@ -1120,10 +1117,11 @@ lof_cutoff <- function(dd_results, lof_scores, celltypes3, cis_cutoff, trans_cut
       lof_scores %>% dplyr::select(gene, lof.oe),
       by = "gene"
     ) %>%
+    dplyr::filter(dd.cis.category.overall != "not DD") %>%
     dplyr::mutate(
       cat = factor(
         as.character(dd.cis.category.overall),
-        levels = c("cis", "mixed", "trans", "neither", "not DD")
+        levels = c("cis", "mixed", "trans", "neither")
       )
     )
 
@@ -1151,8 +1149,7 @@ lof_cutoff <- function(dd_results, lof_scores, celltypes3, cis_cutoff, trans_cut
       "cis"     = "#009E73",
       "mixed"   = "#CC79A7",
       "trans"   = "#D55E00",
-      "neither" = "#0072B2",
-      "not DD"  = "grey70"
+      "neither" = "#0072B2"
     )) +
 
     ggplot2::labs(x = "", y = "LOEUF") +
@@ -1173,8 +1170,7 @@ lof_cutoff <- function(dd_results, lof_scores, celltypes3, cis_cutoff, trans_cut
       "cis"     = expression(italic("cis")),
       "mixed"   = "mixed",
       "trans"   = expression(italic("trans")),
-      "neither" = "neither",
-      "not DD"  = "not DD"
+      "neither" = "neither"
     ))
 
   # add p-value label
@@ -1213,11 +1209,13 @@ mart <- read.delim(
 mart <- mart %>%
   dplyr::mutate(
     percent_identity = pmin(
-      as.numeric(X.id..query.gene.identical.to.target.Chimpanzee.gene),
+      #as.numeric(X.id..query.gene.identical.to.target.Chimpanzee.gene),
       as.numeric(X.id..target.Chimpanzee.gene.identical.to.query.gene),
       na.rm = TRUE
     )
   )
+
+mart <- mart %>% filter(Chimpanzee.orthology.confidence..0.low..1.high. ==1)
 ```
 
 Plot by cis/trans categories.
@@ -1236,11 +1234,15 @@ plot_df2 <- plot_df %>%
   dplyr::mutate(
     cat = factor(
       as.character(dd.cis.category.overall),
-      levels = c("cis",  "neither","mixed", "trans", "not DD")
+      levels = c("cis", "neither", "mixed", "trans", "not DD")
     )
   ) %>%
-  dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
-
+  dplyr::filter(
+    !is.na(percent_identity),
+    is.finite(percent_identity),
+    cat != "not DD"   # <-- remove it here
+  ) %>%
+  droplevels()
 # cis vs trans only for significance
 cis_trans <- plot_df2 %>%
   dplyr::filter(cat %in% c("cis", "trans")) %>%
@@ -1251,10 +1253,10 @@ cis_trans <- plot_df2 %>%
 pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
 p_label <- paste0("p < ", round_up_signif(pval))
 
-ymin <- 80
-ymax <- 103
+ymin <- 95
+ymax <- 101
 
-y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+y_pos <- 100.75 #min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
 h <- (ymax - ymin) * 0.03
 
 p_pci <- ggplot(plot_df2, aes(x = cat, y = percent_identity, fill = cat)) +
@@ -1293,7 +1295,7 @@ p_pci <- ggplot(plot_df2, aes(x = cat, y = percent_identity, fill = cat)) +
   ))
 
 p_pci
-#ggsave(paste0(results_path, 'pci_cis_trans.pdf'), plot = p_pci, device = "pdf", width = 7, height = 5, units = "in")
+ggsave(paste0(results_path, 'pci_cis_trans.pdf'), plot = p_pci, device = "pdf", width = 7, height = 5, units = "in")
 ```
 
 #### Supplementary varying cis/trans
@@ -1322,10 +1324,11 @@ pci_cutoff <- function(dd_results, mart, cis_cutoff, trans_cutoff) {
     )
 
   plot_df2 <- plot_df %>%
+    dplyr::filter(combined_category != "not DD") %>%
     dplyr::mutate(
       cat = factor(
         combined_category,
-        levels = c("cis", "neither", "trans", "not DD")
+        levels = c("cis", "neither", "trans")
       )
     ) %>%
     dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
@@ -1338,28 +1341,24 @@ pci_cutoff <- function(dd_results, mart, cis_cutoff, trans_cutoff) {
   pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
   p_label <- paste0("p < ", round_up_signif(pval))
 
-  ymin <- 80
-  ymax <- 103
+  ymin <- 93
+  ymax <- 101
 
-  y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+  y_pos <- 100.75
   h <- (ymax - ymin) * 0.03
 
   p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = percent_identity, fill = cat)) +
     ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
-
     ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
     ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
-
     ggplot2::scale_fill_manual(values = c(
       "cis"     = "#009E73",
       "neither" = "#0072B2",
-      "trans"   = "#D55E00",
-      "not DD"  = "grey70"
+      "trans"   = "#D55E00"
     )) +
     ggplot2::labs(x = "", y = "Percent coding identity") +
-
     ggpubr::theme_pubr() +
     ggplot2::theme(
       axis.line = ggplot2::element_blank(),
@@ -1374,10 +1373,9 @@ pci_cutoff <- function(dd_results, mart, cis_cutoff, trans_cutoff) {
     ) +
     ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
     ggplot2::scale_x_discrete(labels = c(
-      cis      = expression(italic("cis")),
-      neither  = "neither",
-      trans    = expression(italic("trans")),
-      `not DD` = "not DD"
+      cis     = expression(italic("cis")),
+      neither = "neither",
+      trans   = expression(italic("trans"))
     ))
 
   return(p)
@@ -1471,10 +1469,11 @@ pci_cutoff <- function(dd_results, mart, celltypes3, cis_cutoff, trans_cutoff) {
     )
 
   plot_df2 <- plot_df %>%
+    dplyr::filter(dd.cis.category.overall != "not DD") %>%
     dplyr::mutate(
       cat = factor(
         as.character(dd.cis.category.overall),
-        levels = c("cis", "mixed", "trans", "neither", "not DD")
+        levels = c("cis", "mixed", "trans", "neither")
       ),
       percent_identity = as.numeric(percent_identity)
     ) %>%
@@ -1488,27 +1487,23 @@ pci_cutoff <- function(dd_results, mart, celltypes3, cis_cutoff, trans_cutoff) {
   pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
   p_label <- paste0("p < ", round_up_signif(pval))
 
-  ymin <- 80
-  ymax <- 103
-  y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+  ymin <- 93
+  ymax <- 101
+  y_pos <- 100.75
   h <- (ymax - ymin) * 0.03
 
   # step 6: plot
   p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = percent_identity, fill = cat)) +
     ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
-
-    # bracket from cis (1) to trans (3)
     ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
     ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
-
     ggplot2::scale_fill_manual(values = c(
       "cis"     = "#009E73",
       "mixed"   = "#CC79A7",
       "trans"   = "#D55E00",
-      "neither" = "#0072B2",
-      "not DD"  = "grey70"
+      "neither" = "#0072B2"
     )) +
     ggplot2::labs(x = "", y = "Percent coding identity") +
     ggpubr::theme_pubr() +
@@ -1528,8 +1523,7 @@ pci_cutoff <- function(dd_results, mart, celltypes3, cis_cutoff, trans_cutoff) {
       "cis"     = expression(italic("cis")),
       "mixed"   = "mixed",
       "trans"   = expression(italic("trans")),
-      "neither" = "neither",
-      "not DD"  = "not DD"
+      "neither" = "neither"
     ))
 
   return(p)
