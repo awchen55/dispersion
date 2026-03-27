@@ -564,9 +564,9 @@ path_ml_parent <- '/project/gilad/awchen55/differentialDispersion/data/crossfilt
 
 ### Add DE results
 ```{r}
-celltypes <- c('ENS glia', 'Glioblast',  'Neuroblast','Neuronal IPC', 'Radial glia')
-celltypes2 <- c('ENS_glia', 'Glioblast',  'Neuroblast','Neuronal_IPC', 'Radial_glia')
-celltypes3 <- c('ENS.glia', 'Glioblast',  'Neuroblast','Neuronal.IPC', 'Radial.glia')
+celltypes  <- c('Neuroblast','ENS glia','Radial glia','Neuronal IPC','Glioblast')
+celltypes2 <- c('Neuroblast','ENS_glia','Radial_glia','Neuronal_IPC','Glioblast')
+celltypes3 <- c('Neuroblast','ENS.glia','Radial.glia','Neuronal.IPC','Glioblast')
 
 master_df <- NULL
 
@@ -711,7 +711,7 @@ master_df_filtered <- master_df[keep_gene, , drop = FALSE]
 
 We add a flag for recapitulated DD genes. These are genes that are significant (LFSR < 0.05) in both settings and have the same sign of effect size (logFC). 1 if genes is recapitulated, 0 if not.
 ```{r}
-celltypes3 <- c('ENS.glia', 'Glioblast',  'Neuroblast','Neuronal.IPC', 'Radial.glia')
+
 for (ct in celltypes3) {
 
   lfsr_dip <- paste0("dd.lfsr.diploid.", ct)
@@ -760,50 +760,67 @@ for (ct in celltypes3) {
 ```
 
 
-We calculate the mean cis proportion for ONLY cell types that are DD and recapitulated.
+We calculate the mean cis proportion for ONLY cell types that are DD in diploid.
 ```{r}
 master_df_filtered <- master_df_filtered %>%
   dplyr::rowwise() %>%
   dplyr::mutate(
-    dd.recapitulated.mean.cis.proportion = mean(
+    dd.in.diploid.mean.cis.proportion = mean(
       ifelse(
-        c_across(paste0("dd.recapitulated.same.sign.", celltypes3)) == 1,
-        c_across(paste0("dd.cis.proportion.", celltypes3)),
-        NA
+        c_across(all_of(paste0("dd.lfsr.diploid.", celltypes3))) < 0.05,
+        c_across(all_of(paste0("dd.cis.proportion.", celltypes3))),
+        NA_real_
       ),
       na.rm = TRUE
     )
   ) %>%
   dplyr::ungroup()
+
+
+# master_df_filtered <- master_df_filtered %>%
+#   dplyr::rowwise() %>%
+#   dplyr::mutate(
+#     dd.recapitulated.mean.cis.proportion = mean(
+#       ifelse(
+#         c_across(paste0("dd.recapitulated.same.sign.", celltypes3)) == 1,
+#         c_across(paste0("dd.cis.proportion.", celltypes3)),
+#         NA
+#       ),
+#       na.rm = TRUE
+#     )
+#   ) %>%
+#   dplyr::ungroup()
+```
+
+```{r}
+head(master_df_filtered)
 ```
 
 
-
-Categorize DD gene as cis or trans per cell type. If cis proportion > 0.70 then cis, < 0.30 then trans, else neither.
+Categorize DD genes in diploid as cis or trans per cell type. If cis proportion > 0.70 then cis, < 0.30 then trans, else neither.
 ```{r}
 cis_cutoff   <- 0.70
 trans_cutoff <- 0.30
 
 for (ct in celltypes3) {
 
-  recap_col <- paste0("dd.recapitulated.same.sign.", ct)
+  lfsr_col    <- paste0("dd.lfsr.diploid.", ct)
   cisprop_col <- paste0("dd.cis.proportion.", ct)
-  out_col <- paste0("dd.cis.category.", ct)
+  out_col     <- paste0("dd.cis.category.", ct)
 
-  recap <- master_df_filtered[[recap_col]]
+  lfsr    <- master_df_filtered[[lfsr_col]]
   cisprop <- master_df_filtered[[cisprop_col]]
 
   # default: not DD
   cat_vec <- rep("not DD", nrow(master_df_filtered))
 
-  # only classify among recapitulated DD (same sign)
-  is_dd <- !is.na(recap) & recap == 1 & !is.na(cisprop)
+  # only classify among diploid-significant DD genes
+  is_dd <- !is.na(lfsr) & lfsr < 0.05 & !is.na(cisprop)
 
   cat_vec[is_dd & cisprop > cis_cutoff] <- "cis"
   cat_vec[is_dd & cisprop < trans_cutoff] <- "trans"
   cat_vec[is_dd & cisprop <= cis_cutoff & cisprop >= trans_cutoff] <- "neither"
 
-  # store as factor with consistent ordering (optional)
   master_df_filtered[[out_col]] <- factor(
     cat_vec,
     levels = c("cis", "neither", "trans", "not DD")
@@ -854,9 +871,9 @@ Create an overall category for cis or trans DD genes based on mean cis proportio
 master_df_filtered <- master_df_filtered %>%
   dplyr::mutate(
     dd.cis.category.overall.mean.definition = dplyr::case_when(
-      is.nan(dd.recapitulated.mean.cis.proportion) ~ "not DD",
-      dd.recapitulated.mean.cis.proportion > 0.7  ~ "cis",
-      dd.recapitulated.mean.cis.proportion < 0.3  ~ "trans",
+      is.nan(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+      dd.in.diploid.mean.cis.proportion > 0.7  ~ "cis",
+      dd.in.diploid.mean.cis.proportion < 0.3  ~ "trans",
       TRUE                                        ~ "neither"
     )
   )
@@ -864,18 +881,43 @@ master_df_filtered <- master_df_filtered %>%
 
 
 ```{r}
-master_df_filtered
+table(master_df_filtered$dd.cis.category.overall.mean.definition)
 ```
 
+```{r}
+table(master_df_filtered$dd.cis.category.overall)
+```
+
+```{r}
+celltype_counts <- master_df_filtered %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.cis.category."),
+    names_to = "celltype",
+    values_to = "category"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\."),
+    celltype = stringr::str_replace_all(celltype, "\\.", " "),
+    category = factor(category, levels = c("cis", "neither", "trans", "mixed", "not DD"))
+  ) %>%
+  dplyr::count(celltype, category, .drop = FALSE) %>%
+  tidyr::pivot_wider(
+    names_from = category,
+    values_from = n,
+    values_fill = 0
+  )
+celltype_counts
+```
 
 ## Save data table
 ```{r}
 path_final <- '/project/gilad/awchen55/differentialDispersion/results/variability_paper/data/'
 
-write.csv(master_df_filtered,paste0(path_final,"DD_interspecies_results.csv"))
+write.csv(master_df_filtered,paste0(path_final,"DD_interspecies_results_final.csv"))
 writexl::write_xlsx(
   master_df_filtered,
-  path = paste0(path_final, "DD_interspecies_results.xlsx")
+  path = paste0(path_final, "DD_interspecies_results_final.xlsx")
 )
 ```
 
