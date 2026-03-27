@@ -28,7 +28,7 @@ We load DD results.
 path_data <- '/project/gilad/awchen55/differentialDispersion/results/variability_paper/data/'
 results_path <- '/project/gilad/awchen55/differentialDispersion/results/variability_paper/'
 
-dd_results <- read.csv(paste0(path_data,"DD_interspecies_results.csv"))[,-1]
+dd_results <- read.csv(paste0(path_data,"DD_interspecies_results_final.csv"))[,-1]
 head(dd_results)
 
 round_up_signif <- function(p, digits = 1) {
@@ -941,12 +941,12 @@ Supplementary using mean cis proportion of cell types DD.
 lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
 
   plot_df2 <- dd_results %>%
-    dplyr::select(gene, dd.recapitulated.mean.cis.proportion) %>%
+    dplyr::select(gene, dd.in.diploid.mean.cis.proportion) %>%
     dplyr::mutate(
       combined_category = dplyr::case_when(
-        is.na(dd.recapitulated.mean.cis.proportion) ~ "not DD",
-        dd.recapitulated.mean.cis.proportion > cis_cutoff   ~ "cis",
-        dd.recapitulated.mean.cis.proportion < trans_cutoff ~ "trans",
+        is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+        dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
         TRUE                                                ~ "neither"
       )
     ) %>%
@@ -1048,26 +1048,28 @@ p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,0.85,0.15)
 #p_0.6_0.4lof + p_0.65_0.35lof + p_0.7_0.3lof + p_0.75_0.25lof + p_0.8_0.2lof + p_0.85_0.15lof
 ```
 
-Supplementary using mixed defintion.
+Supplementary using mixed definition.
 ```{r}
-lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
 
+lof_cutoff <- function(dd_results, lof_scores, celltypes3, cis_cutoff, trans_cutoff) {
+
+  # step 1: create per-cell-type cis/trans/neither/not DD categories
   dd_results2 <- dd_results %>%
     dplyr::mutate(
       dplyr::across(
-        starts_with("dd.cis.proportion."),
+        dplyr::all_of(paste0("dd.cis.proportion.", celltypes3)),
         ~ {
           ct <- sub("^dd\\.cis\\.proportion\\.", "", dplyr::cur_column())
-          dd_col <- paste0("dd.recapitulated.same.sign.", ct)
+          dd_col <- paste0("dd.lfsr.diploid.", ct)
 
           if (!dd_col %in% names(dd_results)) {
-            return(rep("not DD", length(.x)))
+            return(rep(NA_character_, length(.x)))
           }
 
           dd_flag <- dd_results[[dd_col]]
 
           out <- rep("not DD", length(.x))
-          is_dd <- !is.na(dd_flag) & dd_flag == 1
+          is_dd <- !is.na(dd_flag) & dd_flag < 0.05 & !is.na(.x)
 
           out[is_dd & .x > cis_cutoff] <- "cis"
           out[is_dd & .x < trans_cutoff] <- "trans"
@@ -1079,69 +1081,80 @@ lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
       )
     )
 
-  cat_cols <- names(dd_results2)[startsWith(names(dd_results2), "dd.cis.category.")]
+  # step 2: only use per-cell-type category columns
+  cat_cols <- paste0("dd.cis.category.", celltypes3)
 
-  gene_category_df <- dd_results2 %>%
-    dplyr::select(gene, dplyr::all_of(cat_cols)) %>%
+  # step 3: create overall category (same logic as master_df_filtered)
+  dd_results2 <- dd_results2 %>%
     dplyr::rowwise() %>%
     dplyr::mutate(
-      has_cis = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "cis", na.rm = TRUE),
-      has_trans = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "trans", na.rm = TRUE),
-      has_neither = any(dplyr::c_across(dplyr::all_of(cat_cols)) == "neither", na.rm = TRUE),
-      combined_category = dplyr::case_when(
-        has_cis & has_trans ~ "mixed",
-        has_cis ~ "cis",
-        has_trans ~ "trans",
-        has_neither ~ "neither",
-        TRUE ~ "not DD"
-      )
-    ) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(gene, combined_category)
+      dd.cis.category.overall = {
+        vals <- dplyr::c_across(dplyr::all_of(cat_cols))
+        vals <- vals[!is.na(vals)]
 
-  plot_df2 <- gene_category_df %>%
+        has_cis     <- "cis" %in% vals
+        has_trans   <- "trans" %in% vals
+        has_neither <- "neither" %in% vals
+
+        if (!has_cis & !has_trans & !has_neither) {
+          "not DD"
+        } else if (has_cis & has_trans) {
+          "mixed"
+        } else if (has_cis) {
+          "cis"
+        } else if (has_trans) {
+          "trans"
+        } else if (has_neither) {
+          "neither"
+        } else {
+          "not DD"
+        }
+      }
+    ) %>%
+    dplyr::ungroup()
+
+  # step 4: prepare plotting df
+  plot_df2 <- dd_results2 %>%
+    dplyr::select(gene, dd.cis.category.overall) %>%
     dplyr::inner_join(
-      lof_scores %>%
-        dplyr::select(gene, lof.oe),
+      lof_scores %>% dplyr::select(gene, lof.oe),
       by = "gene"
     ) %>%
     dplyr::mutate(
       cat = factor(
-        combined_category,
-        levels = c("cis", "neither", "trans","mixed", "not DD")
+        as.character(dd.cis.category.overall),
+        levels = c("cis", "mixed", "trans", "neither", "not DD")
       )
     )
 
-  # Wilcoxon: cis vs trans
+  # step 5: Wilcoxon test (cis vs trans only)
   pval <- plot_df2 %>%
     dplyr::filter(cat %in% c("cis", "trans")) %>%
     dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
     dplyr::pull(p)
 
-   p_label <- paste0(
-    "p < ",
-    round_up_signif(pval)
-  )
+  p_label <- paste0("p < ", round_up_signif(pval))
 
   y_pos <- min(1.75, max(plot_df2$lof.oe, na.rm = TRUE) * 1.12)
   h <- 0.05
 
+  # step 6: plot
   p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
     ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
 
-    # bracket spanning cis (1) to trans (3)
+    # bracket (cis = 1, trans = 3 in new order)
     ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
     ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
-    
 
     ggplot2::scale_fill_manual(values = c(
       "cis"     = "#009E73",
-      "neither" = "#0072B2",
-      "trans"   = "#D55E00",
       "mixed"   = "#CC79A7",
+      "trans"   = "#D55E00",
+      "neither" = "#0072B2",
       "not DD"  = "grey70"
     )) +
+
     ggplot2::labs(x = "", y = "LOEUF") +
     ggpubr::theme_pubr() +
     ggplot2::theme(
@@ -1158,50 +1171,381 @@ lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
     ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
     ggplot2::scale_x_discrete(labels = c(
       "cis"     = expression(italic("cis")),
-      "neither" = "neither",
-      "trans"   = expression(italic("trans")),
       "mixed"   = "mixed",
+      "trans"   = expression(italic("trans")),
+      "neither" = "neither",
       "not DD"  = "not DD"
     ))
-    # add p-value label conditionally
-    if (pval >= 1e-4) {
-      p_lof <- p_lof +
-        ggplot2::annotate(
-          "text",
-          x = 2,
-          y = y_pos + h,
-          label = p_label,
-          size = 4
-        )
-    } else {
-      p_lof <- p_lof +
-        ggplot2::annotate(
-          "text",
-          x = 2,
-          y = y_pos + h,
-          label = p_label,
-          size = 4,
-          parse = TRUE
-        )
-    }
 
+  # add p-value label
+  if (pval >= 1e-4) {
+    p_lof <- p_lof +
+      ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4)
+  } else {
+    p_lof <- p_lof +
+      ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4, parse = TRUE)
+  }
 
   return(p_lof)
 }
 ```
 
 ```{r}
-p_0.6_0.4lof <-lof_cutoff(dd_results,lof_scores,0.6,0.4)
-p_0.65_0.35lof <-lof_cutoff(dd_results,lof_scores,0.65,0.35)
-p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,0.7,0.3)
-p_0.75_0.25lof <-lof_cutoff(dd_results,lof_scores,0.75,0.25)
-p_0.8_0.2lof <-lof_cutoff(dd_results,lof_scores,0.8,0.2)
-p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,0.85,0.15)
+p_0.6_0.4lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.6,0.4)
+p_0.65_0.35lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.65,0.35)
+p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.7,0.3)
+p_0.75_0.25lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.75,0.25)
+p_0.8_0.2lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.8,0.2)
+p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,celltypes3,0.85,0.15)
 
 # p_0.6_0.4lof + p_0.65_0.35lof + p_0.7_0.3lof + p_0.75_0.25lof + p_0.8_0.2lof + p_0.85_0.15lof
 ```
 
+### Percent coding identity
 
+We load percent coding identity. We take more conservative estimate of coding divergence by taking the minimum difference between human to chimp and chimp to human.
+```{r}
+mart <- read.delim(
+  gzfile("/project2/gilad/kenneth/Analysis/mart_export.txt.gz"),
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+mart <- mart %>%
+  dplyr::mutate(
+    percent_identity = pmin(
+      as.numeric(X.id..query.gene.identical.to.target.Chimpanzee.gene),
+      as.numeric(X.id..target.Chimpanzee.gene.identical.to.query.gene),
+      na.rm = TRUE
+    )
+  )
+```
+
+Plot by cis/trans categories.
+```{r}
+plot_df <- dd_results %>%
+  dplyr::select(gene, dd.cis.category.overall) %>%
+  dplyr::left_join(
+    mart %>%
+      dplyr::select(Gene.name, percent_identity) %>%
+      dplyr::rename(gene = Gene.name) %>%
+      dplyr::mutate(percent_identity = as.numeric(percent_identity)),
+    by = "gene"
+  )
+
+plot_df2 <- plot_df %>%
+  dplyr::mutate(
+    cat = factor(
+      as.character(dd.cis.category.overall),
+      levels = c("cis",  "neither","mixed", "trans", "not DD")
+    )
+  ) %>%
+  dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
+
+# cis vs trans only for significance
+cis_trans <- plot_df2 %>%
+  dplyr::filter(cat %in% c("cis", "trans")) %>%
+  dplyr::mutate(
+    cat = droplevels(cat)
+  )
+
+pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
+p_label <- paste0("p < ", round_up_signif(pval))
+
+ymin <- 80
+ymax <- 103
+
+y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+h <- (ymax - ymin) * 0.03
+
+p_pci <- ggplot(plot_df2, aes(x = cat, y = percent_identity, fill = cat)) +
+  geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+  annotate("segment", x = 1, xend = 4, y = y_pos, yend = y_pos) +
+  annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = 4, xend = 4, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = 2.5, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+  scale_fill_manual(values = c(
+    "cis"     = "#009E73",
+    "mixed"   = "#CC79A7",
+    "trans"   = "#D55E00",
+    "neither" = "#0072B2",
+    "not DD"  = "grey70"
+  )) +
+  labs(x = "", y = "Percent coding identity") +
+  ggpubr::theme_pubr() +
+  theme(
+    axis.line = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 1, fill = NA),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "none",
+    axis.title = element_text(size = 14),
+    axis.text  = element_text(size = 12)
+  ) +
+  coord_cartesian(ylim = c(ymin, ymax)) +
+  scale_x_discrete(labels = c(
+    "cis"     = expression(italic("cis")),
+    "neither" = "neither",
+    "mixed"   = "mixed",
+    "trans"   = expression(italic("trans")),
+    "not DD"  = "not DD"
+  ))
+
+p_pci
+#ggsave(paste0(results_path, 'pci_cis_trans.pdf'), plot = p_pci, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### Supplementary varying cis/trans
+
+Using mean definition.
+
+```{r}
+pci_cutoff <- function(dd_results, mart, cis_cutoff, trans_cutoff) {
+
+  plot_df <- dd_results %>%
+    dplyr::select(gene, dd.in.diploid.mean.cis.proportion) %>%
+    dplyr::mutate(
+      combined_category = dplyr::case_when(
+        is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+        dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
+        TRUE                                             ~ "neither"
+      )
+    ) %>%
+    dplyr::left_join(
+      mart %>%
+        dplyr::select(Gene.name, percent_identity) %>%
+        dplyr::rename(gene = Gene.name) %>%
+        dplyr::mutate(percent_identity = as.numeric(percent_identity)),
+      by = "gene"
+    )
+
+  plot_df2 <- plot_df %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans", "not DD")
+      )
+    ) %>%
+    dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
+
+  # cis vs trans only
+  cis_trans <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::mutate(cat = droplevels(cat))
+
+  pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
+  p_label <- paste0("p < ", round_up_signif(pval))
+
+  ymin <- 80
+  ymax <- 103
+
+  y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+  h <- (ymax - ymin) * 0.03
+
+  p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = percent_identity, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "neither" = "#0072B2",
+      "trans"   = "#D55E00",
+      "not DD"  = "grey70"
+    )) +
+    ggplot2::labs(x = "", y = "Percent coding identity") +
+
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", linewidth = 1, fill = NA),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text  = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
+    ggplot2::scale_x_discrete(labels = c(
+      cis      = expression(italic("cis")),
+      neither  = "neither",
+      trans    = expression(italic("trans")),
+      `not DD` = "not DD"
+    ))
+
+  return(p)
+}
+```
+
+```{r}
+p_0.6_0.4_pci  <- pci_cutoff(dd_results, mart, 0.6, 0.4)
+p_0.65_0.35_pci <- pci_cutoff(dd_results, mart, 0.65, 0.35)
+p_0.7_0.3_pci  <- pci_cutoff(dd_results, mart, 0.7, 0.3)
+p_0.75_0.25_pci <- pci_cutoff(dd_results, mart, 0.75, 0.25)
+p_0.8_0.2_pci  <- pci_cutoff(dd_results, mart, 0.8, 0.2)
+p_0.85_0.15_pci <- pci_cutoff(dd_results, mart, 0.85, 0.15)
+
+#p_0.6_0.4_pci + p_0.65_0.35_pci + p_0.7_0.3_pci + p_0.75_0.25_pci + p_0.8_0.2_pci + p_0.85_0.15_pci
+```
+
+Using mixed definition.
+
+```{r}
+pci_cutoff <- function(dd_results, mart, celltypes3, cis_cutoff, trans_cutoff) {
+
+  # step 1: create per-cell-type cis/trans/neither/not DD categories
+  dd_results2 <- dd_results %>%
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::all_of(paste0("dd.cis.proportion.", celltypes3)),
+        ~ {
+          ct <- sub("^dd\\.cis\\.proportion\\.", "", dplyr::cur_column())
+          dd_col <- paste0("dd.lfsr.diploid.", ct)
+
+          if (!dd_col %in% names(dd_results)) {
+            return(rep(NA_character_, length(.x)))
+          }
+
+          dd_flag <- dd_results[[dd_col]]
+
+          out <- rep("not DD", length(.x))
+          is_dd <- !is.na(dd_flag) & dd_flag < 0.05 & !is.na(.x)
+
+          out[is_dd & .x > cis_cutoff] <- "cis"
+          out[is_dd & .x < trans_cutoff] <- "trans"
+          out[is_dd & .x >= trans_cutoff & .x <= cis_cutoff] <- "neither"
+
+          out
+        },
+        .names = "dd.cis.category.{sub('^dd\\\\.cis\\\\.proportion\\\\.', '', .col)}"
+      )
+    )
+
+  # step 2: only use the per-cell-type category columns
+  cat_cols <- paste0("dd.cis.category.", celltypes3)
+
+  # step 3: create overall category using same logic as master_df_filtered
+  dd_results2 <- dd_results2 %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      dd.cis.category.overall = {
+        vals <- dplyr::c_across(dplyr::all_of(cat_cols))
+        vals <- vals[!is.na(vals)]
+
+        has_cis     <- "cis" %in% vals
+        has_trans   <- "trans" %in% vals
+        has_neither <- "neither" %in% vals
+
+        if (!has_cis & !has_trans & !has_neither) {
+          "not DD"
+        } else if (has_cis & has_trans) {
+          "mixed"
+        } else if (has_cis) {
+          "cis"
+        } else if (has_trans) {
+          "trans"
+        } else if (has_neither) {
+          "neither"
+        } else {
+          "not DD"
+        }
+      }
+    ) %>%
+    dplyr::ungroup()
+
+  # step 4: join percent coding identity
+  plot_df <- dd_results2 %>%
+    dplyr::select(gene, dd.cis.category.overall) %>%
+    dplyr::left_join(
+      mart %>%
+        dplyr::select(Gene.name, percent_identity) %>%
+        dplyr::rename(gene = Gene.name),
+      by = "gene"
+    )
+
+  plot_df2 <- plot_df %>%
+    dplyr::mutate(
+      cat = factor(
+        as.character(dd.cis.category.overall),
+        levels = c("cis", "mixed", "trans", "neither", "not DD")
+      ),
+      percent_identity = as.numeric(percent_identity)
+    ) %>%
+    dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
+
+  # step 5: Wilcoxon test on cis vs trans only
+  cis_trans <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::mutate(cat = droplevels(cat))
+
+  pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
+  p_label <- paste0("p < ", round_up_signif(pval))
+
+  ymin <- 80
+  ymax <- 103
+  y_pos <- min(ymax - 1, max(plot_df2$percent_identity, na.rm = TRUE) * 1.05)
+  h <- (ymax - ymin) * 0.03
+
+  # step 6: plot
+  p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = percent_identity, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    # bracket from cis (1) to trans (3)
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("text", x = 2, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "mixed"   = "#CC79A7",
+      "trans"   = "#D55E00",
+      "neither" = "#0072B2",
+      "not DD"  = "grey70"
+    )) +
+    ggplot2::labs(x = "", y = "Percent coding identity") +
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", linewidth = 1, fill = NA),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 14),
+      axis.text  = ggplot2::element_text(size = 12)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
+    ggplot2::scale_x_discrete(labels = c(
+      "cis"     = expression(italic("cis")),
+      "mixed"   = "mixed",
+      "trans"   = expression(italic("trans")),
+      "neither" = "neither",
+      "not DD"  = "not DD"
+    ))
+
+  return(p)
+}
+```
+
+```{r}
+p_0.6_0.4_pci   <- pci_cutoff(dd_results, mart, celltypes3, 0.6, 0.4)
+p_0.65_0.35_pci <- pci_cutoff(dd_results, mart, celltypes3, 0.65, 0.35)
+p_0.7_0.3_pci   <- pci_cutoff(dd_results, mart, celltypes3, 0.7, 0.3)
+p_0.75_0.25_pci <- pci_cutoff(dd_results, mart, celltypes3, 0.75, 0.25)
+p_0.8_0.2_pci   <- pci_cutoff(dd_results, mart, celltypes3, 0.8, 0.2)
+p_0.85_0.15_pci <- pci_cutoff(dd_results, mart, celltypes3, 0.85, 0.15)
+
+# p_0.6_0.4_pci + p_0.65_0.35_pci + p_0.7_0.3_pci +   p_0.75_0.25_pci + p_0.8_0.2_pci + p_0.85_0.15_pci
+```
 
 ### dN/dS
 
@@ -1285,7 +1629,7 @@ p <- ggplot(plot_df2, aes(x = cat, y = dn.ds, fill = cat)) +
   ))
 
 p
-#ggsave(paste0(results_path, 'dnds_cis_trans.pdf'), plot = p, device = "pdf", width = 7, height = 5, units = "in")
+ggsave(paste0(results_path, 'dnds_cis_trans.pdf'), plot = p, device = "pdf", width = 7, height = 5, units = "in")
 ```
 
 #### Supplementary varying cis/trans cutoff
@@ -1295,12 +1639,12 @@ Using mean definition for cis and trans genes.
 dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
 
   plot_df <- dd_results %>%
-    dplyr::select(gene, dd.recapitulated.mean.cis.proportion) %>%
+    dplyr::select(gene, dd.in.diploid.mean.cis.proportion) %>%
     dplyr::mutate(
       combined_category = dplyr::case_when(
-        is.na(dd.recapitulated.mean.cis.proportion) ~ "not DD",
-        dd.recapitulated.mean.cis.proportion > cis_cutoff   ~ "cis",
-        dd.recapitulated.mean.cis.proportion < trans_cutoff ~ "trans",
+        is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+        dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
         TRUE                                                ~ "neither"
       )
     ) %>%
@@ -1390,37 +1734,25 @@ p_0.85_0.15dnds <-dn_ds_cutoff(dd_results,dn.ds,0.85,0.15)
 
 Using the mixed definition for cis and trans genes.
 ```{r}
-dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
+dn_ds_cutoff <- function(dd_results, dn.ds, celltypes3, cis_cutoff, trans_cutoff) {
 
+  # step 1: create per-cell-type cis/trans/neither/not DD categories
   dd_results2 <- dd_results %>%
     dplyr::mutate(
-      across(
-        starts_with("dd.cis.proportion."),
-        ~ dplyr::case_when(
-          .x > cis_cutoff   ~ "cis",
-          .x < trans_cutoff ~ "trans",
-          TRUE              ~ "neither"
-        ),
-        .names = "dd.cis.category.{sub('^dd\\\\.cis\\\\.proportion\\\\.', '', .col)}"
-      )
-    )
-
-  dd_results2 <- dd_results2 %>%
-    dplyr::mutate(
-      across(
-        starts_with("dd.cis.proportion."),
+      dplyr::across(
+        dplyr::all_of(paste0("dd.cis.proportion.", celltypes3)),
         ~ {
           ct <- sub("^dd\\.cis\\.proportion\\.", "", dplyr::cur_column())
-          dd_col <- paste0("dd.recapitulated.same.sign.", ct)
+          dd_col <- paste0("dd.lfsr.diploid.", ct)
 
-          if (!dd_col %in% names(dd_results2)) {
-            return(rep("not DD", length(.x)))
+          if (!dd_col %in% names(dd_results)) {
+            return(rep(NA_character_, length(.x)))
           }
 
-          dd_flag <- dd_results2[[dd_col]]
+          dd_flag <- dd_results[[dd_col]]
 
           out <- rep("not DD", length(.x))
-          is_dd <- !is.na(dd_flag) & dd_flag == 1
+          is_dd <- !is.na(dd_flag) & dd_flag < 0.05 & !is.na(.x)
 
           out[is_dd & .x > cis_cutoff] <- "cis"
           out[is_dd & .x < trans_cutoff] <- "trans"
@@ -1432,28 +1764,41 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
       )
     )
 
-  # get all cis-category columns
-  cat_cols <- names(dd_results2)[startsWith(names(dd_results2), "dd.cis.category.")]
+  # step 2: only use the per-cell-type category columns
+  cat_cols <- paste0("dd.cis.category.", celltypes3)
 
-  gene_category_df <- dd_results2 %>%
-    dplyr::select(gene, all_of(cat_cols)) %>%
+  # step 3: create overall category using same logic as master_df_filtered
+  dd_results2 <- dd_results2 %>%
     dplyr::rowwise() %>%
     dplyr::mutate(
-      has_cis = any(dplyr::c_across(all_of(cat_cols)) == "cis", na.rm = TRUE),
-      has_trans = any(dplyr::c_across(all_of(cat_cols)) == "trans", na.rm = TRUE),
-      has_neither = any(dplyr::c_across(all_of(cat_cols)) == "neither", na.rm = TRUE),
-      combined_category = dplyr::case_when(
-        has_cis & has_trans ~ "mixed",
-        has_cis ~ "cis",
-        has_trans ~ "trans",
-        has_neither ~ "neither",
-        TRUE ~ "not DD"
-      )
-    ) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(gene, combined_category)
+      dd.cis.category.overall = {
+        vals <- dplyr::c_across(dplyr::all_of(cat_cols))
+        vals <- vals[!is.na(vals)]
 
-  plot_df <- gene_category_df %>%
+        has_cis     <- "cis" %in% vals
+        has_trans   <- "trans" %in% vals
+        has_neither <- "neither" %in% vals
+
+        if (!has_cis & !has_trans & !has_neither) {
+          "not DD"
+        } else if (has_cis & has_trans) {
+          "mixed"
+        } else if (has_cis) {
+          "cis"
+        } else if (has_trans) {
+          "trans"
+        } else if (has_neither) {
+          "neither"
+        } else {
+          "not DD"
+        }
+      }
+    ) %>%
+    dplyr::ungroup()
+
+  # step 4: join dN/dS
+  plot_df <- dd_results2 %>%
+    dplyr::select(gene, dd.cis.category.overall) %>%
     dplyr::left_join(
       dn.ds %>%
         dplyr::select(V4, V11) %>%
@@ -1463,12 +1808,15 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
 
   plot_df2 <- plot_df %>%
     dplyr::mutate(
-      cat = factor(combined_category, levels = c("cis", "neither", "trans", "mixed", "not DD")),
+      cat = factor(
+        as.character(dd.cis.category.overall),
+        levels = c("cis", "mixed", "trans", "neither", "not DD")
+      ),
       dn.ds = as.numeric(dn.ds)
     ) %>%
     dplyr::filter(!is.na(dn.ds), is.finite(dn.ds))
 
-  # cis vs trans only for significance
+  # step 5: Wilcoxon test on cis vs trans only
   cis_trans <- plot_df2 %>%
     dplyr::filter(cat %in% c("cis", "trans"))
 
@@ -1477,13 +1825,14 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
 
   ymin <- 0
   ymax <- 0.6
-
   y_pos <- min(ymax - 0.03, max(plot_df2$dn.ds, na.rm = TRUE) * 1.1)
   h <- 0.02
 
+  # step 6: plot
   p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = dn.ds, fill = cat)) +
     ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
 
+    # bracket from cis (1) to trans (3)
     ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
     ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
     ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
@@ -1491,13 +1840,12 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
 
     ggplot2::scale_fill_manual(values = c(
       "cis"     = "#009E73",
-      "neither" = "#0072B2",
-      "trans"   = "#D55E00",
       "mixed"   = "#CC79A7",
+      "trans"   = "#D55E00",
+      "neither" = "#0072B2",
       "not DD"  = "grey70"
     )) +
     ggplot2::labs(x = "", y = "dN/dS") +
-
     ggpubr::theme_pubr() +
     ggplot2::theme(
       axis.line = ggplot2::element_blank(),
@@ -1512,11 +1860,11 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
     ) +
     ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
     ggplot2::scale_x_discrete(labels = c(
-      cis      = expression(italic("cis")),
-      neither  = "neither",
-      trans    = expression(italic("trans")),
-      mixed    = "mixed",
-      `not DD` = "not DD"
+      "cis"     = expression(italic("cis")),
+      "mixed"   = "mixed",
+      "trans"   = expression(italic("trans")),
+      "neither" = "neither",
+      "not DD"  = "not DD"
     ))
 
   return(p)
@@ -1524,19 +1872,16 @@ dn_ds_cutoff <- function(dd_results, dn.ds, cis_cutoff, trans_cutoff) {
 ```
 
 ```{r}
-p_0.6_0.4dnds <-dn_ds_cutoff(dd_results,dn.ds,0.6,0.4)
-p_0.65_0.35dnds <-dn_ds_cutoff(dd_results,dn.ds,0.65,0.35)
-p_0.7_0.3dnds <-dn_ds_cutoff(dd_results,dn.ds,0.7,0.3)
-p_0.75_0.25dnds <-dn_ds_cutoff(dd_results,dn.ds,0.75,0.25)
-p_0.8_0.2dnds <-dn_ds_cutoff(dd_results,dn.ds,0.8,0.2)
-p_0.85_0.15dnds <-dn_ds_cutoff(dd_results,dn.ds,0.85,0.15)
+p_0.6_0.4dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.6,0.4)
+p_0.65_0.35dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.65,0.35)
+p_0.7_0.3dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.7,0.3)
+p_0.75_0.25dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.75,0.25)
+p_0.8_0.2dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.8,0.2)
+p_0.85_0.15dnds <-dn_ds_cutoff(dd_results,dn.ds, celltypes3,0.85,0.15)
 
 # p_0.6_0.4dnds + p_0.65_0.35dnds + p_0.7_0.3dnds + p_0.75_0.25dnds + p_0.8_0.2dnds + p_0.85_0.15dnds
 ```
 
-```{r}
-
-```
 
 
 ### Supplementary: Determining cis/trans cutoffs
@@ -1549,7 +1894,7 @@ celltypes <- c("ENS.glia", "Glioblast", "Neuroblast", "Neuronal.IPC", "Radial.gl
 cutoffs   <- seq(0.5, 1, by = 0.1)
 
 # ----------------------------------------------
-# 2. Wide → long for cis proportion
+# 1. Wide -> long for cis proportion
 #    dd.cis.proportion.<celltype>
 # ----------------------------------------------
 cis_long <- dd_results %>%
@@ -1564,36 +1909,41 @@ cis_long <- dd_results %>%
   )
 
 # ----------------------------------------------
-# 3. Wide → long for recapitulated same-sign flag
-#    dd.recapitulated.same.sign.<celltype>
+# 2. Wide -> long for diploid DD significance
+#    dd.lfsr.diploid.<celltype>
 # ----------------------------------------------
-recap_long <- dd_results %>%
-  dplyr::select(gene, starts_with("dd.recapitulated.same.sign.")) %>%
+lfsr_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.lfsr.diploid.")) %>%
   tidyr::pivot_longer(
-    cols      = starts_with("dd.recapitulated.same.sign."),
+    cols      = starts_with("dd.lfsr.diploid."),
     names_to  = "celltype",
-    values_to = "recap_same_sign"
+    values_to = "dd_lfsr_diploid"
   ) %>%
   dplyr::mutate(
-    celltype = sub("^dd\\.recapitulated\\.same\\.sign\\.", "", celltype)
+    celltype = sub("^dd\\.lfsr\\.diploid\\.", "", celltype)
   )
 
 # ----------------------------------------------
-# 4. Merge and filter to recapitulated same-sign genes only
+# 3. Merge and filter to diploid DD genes only
+#    condition: dd.lfsr.diploid < 0.05
 # ----------------------------------------------
-df_recap <- cis_long %>%
-  dplyr::inner_join(recap_long, by = c("gene", "celltype")) %>%
-  dplyr::filter(celltype %in% celltypes, recap_same_sign == 1)
+df_dd <- cis_long %>%
+  dplyr::inner_join(lfsr_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(
+    celltype %in% celltypes,
+    !is.na(dd_lfsr_diploid),
+    dd_lfsr_diploid < 0.05
+  )
 
 # ----------------------------------------------
-# 5. Count cis genes passing each cutoff by cell type
+# 4. Count cis genes passing each cutoff by cell type
 #    condition: cis_prop >= cutoff
 # ----------------------------------------------
-summary_plot_recap <- tidyr::expand_grid(
+summary_plot_dd <- tidyr::expand_grid(
   celltype = celltypes,
   cutoff   = cutoffs
 ) %>%
-  dplyr::left_join(df_recap, by = "celltype") %>%
+  dplyr::left_join(df_dd, by = "celltype") %>%
   dplyr::group_by(celltype, cutoff) %>%
   dplyr::summarise(
     n_cis_genes = sum(cis_prop >= cutoff, na.rm = TRUE),
@@ -1601,16 +1951,16 @@ summary_plot_recap <- tidyr::expand_grid(
   )
 
 # ----------------------------------------------
-# 6. Plot
+# 5. Plot
 # ----------------------------------------------
 p_cis_cutoff_genes <- ggplot2::ggplot(
-  summary_plot_recap,
+  summary_plot_dd,
   ggplot2::aes(x = cutoff, y = n_cis_genes, color = celltype)
 ) +
   ggplot2::geom_line(linewidth = 1.2) +
   ggplot2::geom_point(size = 3) +
-  ggplot2::coord_cartesian(ylim = c(0, 120)) +
-  ggplot2::scale_y_continuous(breaks = c(0,20,40,60,80,100,120)) +
+  ggplot2::coord_cartesian(ylim = c(0, 800)) +
+  ggplot2::scale_y_continuous(breaks = c(0, 200,400,600,800)) +
   ggplot2::scale_x_continuous(breaks = cutoffs, limits = c(0.5, 1)) +
   ggplot2::labs(
     x = expression(italic("cis") ~ "proportion"),
@@ -1637,7 +1987,7 @@ Using trans cutoffs.
 cutoffs_trans <- seq(0, 0.5, by = 0.1)
 
 # ----------------------------------------------
-# 2. Wide → long for cis proportion
+# 1. Wide -> long for cis proportion
 #    dd.cis.proportion.<celltype>
 # ----------------------------------------------
 cis_long <- dd_results %>%
@@ -1652,36 +2002,41 @@ cis_long <- dd_results %>%
   )
 
 # ----------------------------------------------
-# 3. Wide → long for recapitulated same-sign flag
-#    dd.recapitulated.same.sign.<celltype>
+# 2. Wide -> long for diploid DD significance
+#    dd.lfsr.diploid.<celltype>
 # ----------------------------------------------
-recap_long <- dd_results %>%
-  dplyr::select(gene, starts_with("dd.recapitulated.same.sign.")) %>%
+lfsr_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.lfsr.diploid.")) %>%
   tidyr::pivot_longer(
-    cols      = starts_with("dd.recapitulated.same.sign."),
+    cols      = starts_with("dd.lfsr.diploid."),
     names_to  = "celltype",
-    values_to = "recap_same_sign"
+    values_to = "dd_lfsr_diploid"
   ) %>%
   dplyr::mutate(
-    celltype = sub("^dd\\.recapitulated\\.same\\.sign\\.", "", celltype)
+    celltype = sub("^dd\\.lfsr\\.diploid\\.", "", celltype)
   )
 
 # ----------------------------------------------
-# 4. Merge and filter to recapitulated same-sign genes only
+# 3. Merge and filter to diploid DD genes only
+#    condition: dd.lfsr.diploid < 0.05
 # ----------------------------------------------
-df_recap <- cis_long %>%
-  dplyr::inner_join(recap_long, by = c("gene", "celltype")) %>%
-  dplyr::filter(celltype %in% celltypes, recap_same_sign == 1)
+df_dd <- cis_long %>%
+  dplyr::inner_join(lfsr_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(
+    celltype %in% celltypes,
+    !is.na(dd_lfsr_diploid),
+    dd_lfsr_diploid < 0.05
+  )
 
 # ----------------------------------------------
-# 5. Count trans genes at each cutoff by cell type
+# 4. Count trans genes at each cutoff by cell type
 #    Define trans as: cis_prop <= cutoff
 # ----------------------------------------------
 summary_plot_trans <- tidyr::expand_grid(
   celltype = celltypes,
   cutoff   = cutoffs_trans
 ) %>%
-  dplyr::left_join(df_recap, by = "celltype") %>%
+  dplyr::left_join(df_dd, by = "celltype") %>%
   dplyr::group_by(celltype, cutoff) %>%
   dplyr::summarise(
     n_trans_genes = sum(cis_prop <= cutoff, na.rm = TRUE),
@@ -1689,7 +2044,7 @@ summary_plot_trans <- tidyr::expand_grid(
   )
 
 # ----------------------------------------------
-# 6. Plot
+# 5. Plot
 # ----------------------------------------------
 p_trans_cutoff_genes <- ggplot2::ggplot(
   summary_plot_trans,
@@ -1697,8 +2052,8 @@ p_trans_cutoff_genes <- ggplot2::ggplot(
 ) +
   ggplot2::geom_line(linewidth = 1.2) +
   ggplot2::geom_point(size = 3) +
-  ggplot2::coord_cartesian(ylim = c(0, 120)) +
-  ggplot2::scale_y_continuous(breaks = c(0,20,40,60,80,100,120)) +
+  ggplot2::coord_cartesian(ylim = c(0, 800)) +
+  ggplot2::scale_y_continuous(breaks = c(0, 200,400,600,800)) +
   ggplot2::scale_x_continuous(breaks = cutoffs_trans, limits = c(0, 0.5)) +
   ggplot2::scale_color_discrete(
     labels = function(x) gsub("\\.", " ", x)
@@ -1732,8 +2087,8 @@ Using cis cutoffs.
 N_ct <- length(celltypes)
 
 # For each cutoff, count how many cell types each gene is cis-like in
-# (defined as dd.cis.proportion >= cutoff among recapitulated same-sign genes)
-gene_ct_counts_cis_recap <- df_recap %>%
+# (defined as dd.cis.proportion >= cutoff among diploid DD genes)
+gene_ct_counts_cis_dd <- df_dd %>%
   dplyr::filter(celltype %in% celltypes) %>%
   tidyr::expand_grid(cutoff = cutoffs) %>%
   dplyr::filter(cis_prop >= cutoff) %>%
@@ -1741,7 +2096,7 @@ gene_ct_counts_cis_recap <- df_recap %>%
   dplyr::count(cutoff, gene, name = "n_celltypes_cis")
 
 # Histogram: number of genes by exact number of cell types (exclude 0)
-plot_df_cis_recap <- gene_ct_counts_cis_recap %>%
+plot_df_cis_dd <- gene_ct_counts_cis_dd %>%
   dplyr::filter(n_celltypes_cis >= 1) %>%
   dplyr::count(cutoff, n_celltypes_cis, name = "n_genes") %>%
   tidyr::complete(
@@ -1756,7 +2111,7 @@ plot_df_cis_recap <- gene_ct_counts_cis_recap %>%
 
 # Plot
 p_cis_dd_celltypes <- ggplot2::ggplot(
-  plot_df_cis_recap,
+  plot_df_cis_dd,
   ggplot2::aes(x = n_celltypes_cis, y = n_genes)
 ) +
   ggplot2::geom_col(fill = "#619CFF") +
@@ -1799,8 +2154,8 @@ p_cis_dd_celltypes
 Using trans cutoffs.
 ```{r}
 # For each cutoff, count how many cell types each gene is trans-like in
-# (defined as dd.cis.proportion <= cutoff among recapitulated same-sign genes)
-gene_ct_counts_trans_recap <- df_recap %>%
+# (defined as dd.cis.proportion <= cutoff among diploid DD genes)
+gene_ct_counts_trans_dd <- df_dd %>%
   dplyr::filter(celltype %in% celltypes) %>%
   tidyr::expand_grid(cutoff = cutoffs_trans) %>%
   dplyr::filter(cis_prop <= cutoff) %>%
@@ -1808,7 +2163,7 @@ gene_ct_counts_trans_recap <- df_recap %>%
   dplyr::count(cutoff, gene, name = "n_celltypes_trans")
 
 # Histogram: number of genes by exact number of cell types (exclude 0)
-plot_df_trans_recap <- gene_ct_counts_trans_recap %>%
+plot_df_trans_dd <- gene_ct_counts_trans_dd %>%
   dplyr::filter(n_celltypes_trans >= 1) %>%
   dplyr::count(cutoff, n_celltypes_trans, name = "n_genes") %>%
   tidyr::complete(
@@ -1823,7 +2178,7 @@ plot_df_trans_recap <- gene_ct_counts_trans_recap %>%
 
 # Plot
 p_trans_cutoff_celltype <- ggplot2::ggplot(
-  plot_df_trans_recap,
+  plot_df_trans_dd,
   ggplot2::aes(x = n_celltypes_trans, y = n_genes)
 ) +
   ggplot2::geom_col(fill = "#619CFF") +
@@ -1944,9 +2299,6 @@ p_cell_counts
 #ggsave(paste0(results_path, 'supplement/cellcounts.pdf'), plot = p_cell_counts, device = "pdf", width = 7, height = 5, units = "in")
 ```
 
-## Supplementary: Simulation
-```{r}
 
-```
 
 
