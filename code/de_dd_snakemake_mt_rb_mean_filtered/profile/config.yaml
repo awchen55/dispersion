@@ -1,0 +1,23 @@
+executor: slurm
+use-conda: true
+
+# Max concurrent SLURM jobs across all rules.
+# Raise or lower this to use more or less of the node.
+jobs: 10
+
+# Cap total memory (MB) held by running jobs at once.
+# 200 GB = ~40% of the 500 GB gilad-hm node.
+resources: "mem_mb=400000"
+
+# Defaults applied to every rule that doesn't override them
+default-resources:
+  slurm_partition: gilad-hm
+  slurm_account:   pi-gilad
+  mem_mb:          8000
+  cpus_per_task:   1
+
+# Retry a job once if it fails (e.g. transient node issue)
+retries: 1
+
+# Print shell commands as they are submitted
+printshellcmds: true

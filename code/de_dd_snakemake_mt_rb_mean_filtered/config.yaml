@@ -1,0 +1,112 @@
+# ============================================================
+# DD/DE Pipeline Configuration
+# ============================================================
+
+# --- Root data directory ---
+data_dir: /project/gilad/awchen55/mechanism/data
+
+# --- Input: diploid Seurat objects (one per cell type) ---
+seurat_diploid_dir: /project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/celltype
+seurat_diploid_prefix: combined_1kFeatures_integrated
+
+# --- Input: tetraploid Seurat objects (one per cell type, space-separated names) ---
+seurat_tetraploid_dir: /project/gilad/awchen55/mechanism/data/tetraploid/celltype
+seurat_tetraploid_prefix: tetraploid_combined_variablfeatures_filtered
+
+# --- Input: diploid h5ad (all cell types combined, for memento variance) ---
+h5ad_diploid: /project/gilad/awchen55/differentialDispersion/data/crossfilt_clustered_data/cell_annotations/parent_crossfilt_celltypes_of_interest.h5ad
+
+# --- Input: tetraploid h5ad files (one per cell type, for memento DD) ---
+h5ad_tetraploid_dir: /project/gilad/awchen55/mechanism/data/tetraploid/celltype
+h5ad_tetraploid_prefix: tetraploid_combined_variablfeatures_filtered
+
+# --- Memento parameters ---
+memento_q: [0.05, 0.1, 0.15, 0.2]  # assumed UMI capture efficiency (one run per value)
+memento_min_perc_group: 0.95  # fraction of groups a gene must be detected in
+memento_num_cpus: 8
+memento_num_boot: 5000
+# Mitochondrial (MT-*) and ribosomal protein (RPL*/RPS*, excluding the RPS6K*
+# kinase family) genes are dropped from the memento var/mean output, AND
+# genes with log mean expression above this cutoff in ANY individual
+# species x sample group are also dropped -- both filters applied together,
+# to both diploid (species x donor) and tetraploid (species x celltype),
+# before DD limma / DD testing (see memento_diploid.py,
+# memento_tetraploid_dd_ct.py). Same cutoff value as the
+# mean_filtered_q_thresholds pipeline (see dispersion_diagnostics.Rmd,
+# Sections 6-7).
+memento_mean_expr_cutoff: -6
+# Diploid only: a species x donor_id group with fewer than this many cells (for
+# a given cell type) produces unstable memento dispersion estimates -- most
+# genes have 0-1 nonzero counts, and the moment estimator collapses to
+# near-identical, artificially very-negative dispersion values across hundreds
+# of unrelated genes at once. Such groups are dropped before memento runs (see
+# memento_diploid.py). Found via the donor cell-count investigation in
+# q_threshold_sensitivity.Rmd (Section 8): chimp donor C3651 had only 4-14
+# cells in Glioblast/ENS_glia/Retinal_neurons vs. hundreds-thousands for other
+# donors, and C4955/C40280 had 26-53 cells in Glioblast.
+memento_min_cells_per_group: 100
+
+# --- LIMMA parameters ---
+limma_voomspan: 0.5
+limma_min_count: 5          # filterByExpr min.count
+limma_ddf: Satterthwaite    # degrees of freedom method for dream
+
+# --- MASH parameters ---
+mash_pca_components: 5
+mash_lfsr_threshold: 0.05
+
+# --- Gene filter applied to both diploid and tetraploid before MASH ---
+# Gene must be tested (logFC != 0) in >= this fraction of cell types in BOTH species.
+# Tetraploid filter is applied first; diploid filter is then applied to the
+# tetraploid-passing gene set. Final gene list = intersection of both.
+gene_filter_threshold: 0.70
+
+# --- Cell types: diploid (DE pseudobulk + limma, DD limma) ---
+celltypes_diploid:
+  - Bronchiolar_and_alveolar_epithelial_cells
+  - Cardiac_mesoderm_cells
+  - Cardiomyocytes
+  - Ciliated_epithelial_cells
+  - ENS_glia
+  - Epicardial_fat_cells
+  - Glioblast
+  - Goblet_cells
+  - Hepatoblasts
+  - Intestinal_epithelial_cells
+  - Metanephric_cells
+  - Neuroblast
+  - Neuron
+  - Neuronal_IPC
+  - Radial_glia
+  - Retinal_neurons
+  - Squamous_epithelial_cells
+  - Stromal_cells
+  - Vascular_endothelial_cells
+  - iPSCs
+
+# --- Cell types: tetraploid DE (Wilcoxon) and DD (memento binary_test_1d) ---
+# Kept identical to celltypes_diploid above (Early_mesoderm_cells removed --
+# it has no diploid counterpart, so it could never contribute to the
+# recapitulation/cis-trans fields in integrate_dd_de.R anyway; see the
+# ct_common intersection there).
+celltypes_tetraploid:
+  - Bronchiolar_and_alveolar_epithelial_cells
+  - Cardiac_mesoderm_cells
+  - Cardiomyocytes
+  - Ciliated_epithelial_cells
+  - ENS_glia
+  - Epicardial_fat_cells
+  - Glioblast
+  - Goblet_cells
+  - Hepatoblasts
+  - Intestinal_epithelial_cells
+  - Metanephric_cells
+  - Neuroblast
+  - Neuron
+  - Neuronal_IPC
+  - Radial_glia
+  - Retinal_neurons
+  - Squamous_epithelial_cells
+  - Stromal_cells
+  - Vascular_endothelial_cells
+  - iPSCs

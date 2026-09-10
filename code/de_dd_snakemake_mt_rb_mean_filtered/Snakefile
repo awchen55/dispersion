@@ -1,0 +1,271 @@
+configfile: "config.yaml"
+
+DATA         = config["data_dir"]
+CT_DIP       = config["celltypes_diploid"]
+CT_TET       = config["celltypes_tetraploid"]
+
+# Base path for all q-dependent outputs
+# Folder layout under mt_rb_mean_filtered_q_thresholds/q{q}/:
+#   memento/          memento variance/mean (diploid) + DD results (tetraploid per CT)
+#   dd/limma/         diploid DD limma fits per cell type
+#   dd/mash/          merged logFC/SE/pval matrices, filtered matrices, MASH RDS files
+#   dd/               gene filter output
+#   (root)            final integrated DD_DE table
+#
+# This is a separate tree from both "mean_filtered_q_thresholds" and
+# "mt_rb_filtered_q_thresholds" (both kept untouched) because
+# memento_diploid_ct and memento_tetraploid_dd_ct here apply BOTH filters
+# together: mitochondrial (MT-*) / ribosomal protein (RPL*/RPS*) genes are
+# dropped AND the log-mean-expression cutoff is applied on top (see
+# memento_diploid.py, memento_tetraploid_dd_ct.py / config["memento_mean_expr_cutoff"]),
+# so these results are not directly comparable to either single-filter run.
+QT = DATA + "/dd_de_results/mt_rb_mean_filtered_q_thresholds/q{q}"
+
+# ---------------------------------------------------------------------------
+rule all:
+    input:
+        expand(DATA + "/dd_de_results/mt_rb_mean_filtered_q_thresholds/q{q}/DD_DE_interspecies_results.csv",
+               q=config["memento_q"])
+
+# ===========================================================================
+# MEMENTO — diploid variance estimation per cell type
+# Groups by species × donor_id (no pool).  Inner join in diploid_dd_merge
+# ensures only genes present in all cell types enter MASH.
+# ===========================================================================
+rule memento_diploid_ct:
+    input:
+        h5ad = config["seurat_diploid_dir"] + "/combined_1kFeatures_{celltype}.h5ad"
+    output:
+        var  = QT + "/memento/diploid_memento_var_{celltype}.csv",
+        mean = QT + "/memento/diploid_memento_mean_{celltype}.csv"
+    params:
+        q                   = "{q}",
+        min_perc_group      = config["memento_min_perc_group"],
+        mean_expr_cutoff    = config["memento_mean_expr_cutoff"],
+        min_cells_per_group = config["memento_min_cells_per_group"]
+    conda: "/project/gilad/awchen55/envs/memento"
+    resources:
+        mem_mb  = 96000
+    script: "scripts/memento_diploid.py"
+
+# ===========================================================================
+# MEMENTO — tetraploid DD per cell type (binary_test_1d, parallel)
+# Also computes per-species (species x celltype, no donor/replicate level)
+# mean/var moments and drops mitochondrial/ribosomal genes plus the
+# log-mean-expression cutoff the same way as the diploid pipeline,
+# restricting the DD test to the retained gene set.
+# ===========================================================================
+rule memento_tetraploid_dd_ct:
+    input:
+        h5ad = config["h5ad_tetraploid_dir"] + "/"
+               + config["h5ad_tetraploid_prefix"] + "_{celltype}.h5ad"
+    output:
+        csv  = QT + "/memento/tetraploid_memento_dd_results_{celltype}.csv",
+        mean = QT + "/memento/tetraploid_memento_mean_{celltype}.csv",
+        var  = QT + "/memento/tetraploid_memento_var_{celltype}.csv"
+    params:
+        q                = "{q}",
+        min_perc_group   = config["memento_min_perc_group"],
+        mean_expr_cutoff = config["memento_mean_expr_cutoff"],
+        num_cpus         = config["memento_num_cpus"],
+        num_boot         = config["memento_num_boot"]
+    conda: "/project/gilad/awchen55/envs/memento"
+    resources:
+        mem_mb        = 64000,
+        cpus_per_task = config["memento_num_cpus"]
+    script: "scripts/memento_tetraploid_dd_ct.py"
+
+# ===========================================================================
+# DIPLOID DE — pseudobulk per cell type  (q-independent)
+# ===========================================================================
+rule diploid_pseudobulk_ct:
+    input:
+        seurat = config["seurat_diploid_dir"] + "/"
+                 + config["seurat_diploid_prefix"] + "_{celltype}.rds"
+    output:
+        pb = DATA + "/de_results/pseudobulk/diploid_data_pb_filt_{celltype}.rds"
+    params:
+        min_cells_per_group = config["memento_min_cells_per_group"]
+    resources:
+        mem_mb  = 64000
+    script: "scripts/diploid_pseudobulk_ct.R"
+
+# ===========================================================================
+# DIPLOID DE — limma-dream per cell type  (q-independent)
+# ===========================================================================
+rule diploid_de_limma_ct:
+    input:
+        pb = DATA + "/de_results/pseudobulk/diploid_data_pb_filt_{celltype}.rds"
+    output:
+        fit = DATA + "/de_results/limma_fit/limma_fit_human_vs_chimp_{celltype}.rds"
+    params:
+        voomspan  = config["limma_voomspan"],
+        min_count = config["limma_min_count"],
+        ddf       = config["limma_ddf"]
+    resources:
+        mem_mb  = 32000
+    script: "scripts/diploid_de_limma_ct.R"
+
+# ===========================================================================
+# DIPLOID DE — merge all cell types into matrices  (q-independent)
+# ===========================================================================
+rule diploid_de_merge:
+    input:
+        fits = expand(DATA + "/de_results/limma_fit/limma_fit_human_vs_chimp_{ct}.rds",
+                      ct=CT_DIP)
+    output:
+        logfc    = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_logFC.csv",
+        se       = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_SE.csv",
+        pval     = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_pval.csv",
+        adj_pval = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_adj_pval.csv"
+    params:
+        celltypes = CT_DIP
+    resources:
+        mem_mb  = 8000
+    script: "scripts/diploid_de_merge.R"
+
+# ===========================================================================
+# DIPLOID DD — limma-dream on quantile-normalised variance per cell type
+# ===========================================================================
+rule diploid_dd_limma_ct:
+    input:
+        var_csv = QT + "/memento/diploid_memento_var_{celltype}.csv"
+    output:
+        fit = QT + "/dd/limma/diploid_memento_limma_dd_results_{celltype}.rds"
+    params:
+        voomspan = config["limma_voomspan"],
+        ddf      = config["limma_ddf"]
+    resources:
+        mem_mb  = 32000
+    script: "scripts/diploid_dd_limma_ct.R"
+
+# ===========================================================================
+# DIPLOID DD — merge all cell types into matrices
+# ===========================================================================
+rule diploid_dd_merge:
+    input:
+        fits = lambda wc: expand(
+            DATA + "/dd_de_results/mt_rb_mean_filtered_q_thresholds/q{q}/dd/limma/diploid_memento_limma_dd_results_{ct}.rds",
+            q=wc.q, ct=CT_DIP)
+    output:
+        logfc = QT + "/dd/mash/diploid_memento_limma_all_celltypes_logFC.csv",
+        se    = QT + "/dd/mash/diploid_memento_limma_all_celltypes_SE.csv",
+        pval  = QT + "/dd/mash/diploid_memento_limma_all_celltypes_pval.csv"
+    params:
+        celltypes = CT_DIP
+    resources:
+        mem_mb  = 8000
+    script: "scripts/diploid_dd_merge.R"
+
+# ===========================================================================
+# TETRAPLOID DD — merge per-CT CSVs (no MASH yet; needed for gene filter)
+# ===========================================================================
+rule tetraploid_dd_merge:
+    input:
+        csvs = lambda wc: expand(
+            DATA + "/dd_de_results/mt_rb_mean_filtered_q_thresholds/q{q}/memento/tetraploid_memento_dd_results_{ct}.csv",
+            q=wc.q, ct=CT_TET)
+    output:
+        logfc = QT + "/dd/mash/tetraploid_memento_all_celltypes_logFC.csv",
+        se    = QT + "/dd/mash/tetraploid_memento_all_celltypes_SE.csv",
+        pval  = QT + "/dd/mash/tetraploid_memento_all_celltypes_pval.csv"
+    params:
+        celltypes = CT_TET
+    resources:
+        mem_mb  = 8000
+    script: "scripts/tetraploid_dd_merge.R"
+
+# ===========================================================================
+# DIPLOID — gene filter + filter matrices (produces gene list for MASH)
+# ===========================================================================
+rule diploid_gene_filter:
+    input:
+        dip_dd_logfc    = QT + "/dd/mash/diploid_memento_limma_all_celltypes_logFC.csv",
+        dip_dd_se       = QT + "/dd/mash/diploid_memento_limma_all_celltypes_SE.csv",
+        dip_dd_pval     = QT + "/dd/mash/diploid_memento_limma_all_celltypes_pval.csv",
+        dip_de_adj_pval = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_adj_pval.csv",
+        tet_dd_logfc    = QT + "/dd/mash/tetraploid_memento_all_celltypes_logFC.csv"
+    output:
+        filtered_logfc = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_logFC.csv",
+        filtered_se    = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_SE.csv",
+        filtered_pval  = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_pval.csv",
+        gene_list      = QT + "/dd/diploid_de_dd_results_filtered.csv"
+    params:
+        filter_threshold  = config["gene_filter_threshold"]
+    resources:
+        mem_mb  = 8000
+    script: "scripts/diploid_gene_filter.R"
+
+# ===========================================================================
+# DIPLOID DD — MASH on filtered matrices
+# ===========================================================================
+rule diploid_dd_mash:
+    input:
+        filtered_logfc = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_logFC.csv",
+        filtered_se    = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_SE.csv",
+        filtered_pval  = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_pval.csv"
+    output:
+        mash_rds = QT + "/dd/mash/diploid_memento_limma_pval_filtered_mash_results.rds"
+    params:
+        pca_components = config["mash_pca_components"],
+        lfsr_threshold = config["mash_lfsr_threshold"]
+    resources:
+        mem_mb  = 64000
+    script: "scripts/diploid_dd_mash.R"
+
+# ===========================================================================
+# TETRAPLOID DD — MASH on filtered tetraploid matrices
+# ===========================================================================
+rule tetraploid_dd_mash:
+    input:
+        logfc     = QT + "/dd/mash/tetraploid_memento_all_celltypes_logFC.csv",
+        se        = QT + "/dd/mash/tetraploid_memento_all_celltypes_SE.csv",
+        pval      = QT + "/dd/mash/tetraploid_memento_all_celltypes_pval.csv",
+        gene_list = QT + "/dd/diploid_de_dd_results_filtered.csv"
+    output:
+        mash_rds = QT + "/dd/mash/tetraploid_memento_mash_pval_results.rds"
+    params:
+        pca_components = config["mash_pca_components"],
+        lfsr_threshold = config["mash_lfsr_threshold"]
+    resources:
+        mem_mb  = 64000
+    script: "scripts/tetraploid_dd_mash.R"
+
+# ===========================================================================
+# TETRAPLOID DE — Wilcoxon signed-rank test per cell type  (q-independent)
+# ===========================================================================
+rule tetraploid_de_wilcoxon_ct:
+    input:
+        seurat = config["seurat_tetraploid_dir"] + "/"
+                 + config["seurat_tetraploid_prefix"] + "_{celltype}.rds"
+    output:
+        csv = DATA + "/de_results/wilcoxon/tetraploid_wilcoxon_de_results_{celltype}.csv"
+    resources:
+        mem_mb  = 128000
+    script: "scripts/tetraploid_de_wilcoxon_ct.R"
+
+# ===========================================================================
+# INTEGRATION — combine all DE + DD into master table
+# ===========================================================================
+rule integrate_dd_de:
+    input:
+        tet_de_csvs     = expand(DATA + "/de_results/wilcoxon/tetraploid_wilcoxon_de_results_{ct}.csv",
+                                 ct=CT_TET),
+        dip_de_logfc    = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_logFC.csv",
+        dip_de_se       = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_SE.csv",
+        dip_de_pval     = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_pval.csv",
+        dip_de_adj_pval = DATA + "/de_results/limma_fit/diploid_limma_all_celltypes_adj_pval.csv",
+        tet_dd_logfc    = QT + "/dd/mash/tetraploid_memento_all_celltypes_logFC.csv",
+        tet_dd_se       = QT + "/dd/mash/tetraploid_memento_all_celltypes_SE.csv",
+        tet_dd_mash     = QT + "/dd/mash/tetraploid_memento_mash_pval_results.rds",
+        dip_dd_logfc    = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_logFC.csv",
+        dip_dd_se       = QT + "/dd/mash/diploid_memento_limma_all_celltypes_filtered_SE.csv",
+        dip_dd_mash     = QT + "/dd/mash/diploid_memento_limma_pval_filtered_mash_results.rds"
+    output:
+        master = QT + "/DD_DE_interspecies_results.csv"
+    params:
+        celltypes_diploid    = CT_DIP,
+        celltypes_tetraploid = CT_TET
+    resources:
+        mem_mb  = 32000
+    script: "scripts/integrate_dd_de.R"
