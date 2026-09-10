@@ -37,9 +37,10 @@ generates this data and how to regenerate it.
 
 ## Notes
 
-- Capture rate assumption: 0.25 (10x Chromium v3, matching the rest of this
-  project). `min_perc_group = 0.95` (memento's `compute_1d_moments`),
-  matching the value used for the project's main dispersion CSVs.
+- Capture rate assumption: 0.25 (the cHDC cardiac pilot was sequenced on the
+  10x GEM-X platform). `min_perc_group = 0.95` (memento's
+  `compute_1d_moments`), matching the value used for the project's main
+  dispersion CSVs.
 - At smaller depths, individuals with fewer cells than the target depth are
   dropped entirely for that depth/replicate (not padded or oversampled) —
   `n_individuals` in `sweep_summary.csv` shows how many of the 3 individuals

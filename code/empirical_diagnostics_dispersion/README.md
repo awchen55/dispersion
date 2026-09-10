@@ -30,7 +30,8 @@ Key parameters (hardcoded at the top of the script):
 - `CELL_TYPE = "Cardiomyocytes"`
 - `DEPTHS = [100, 250, 500, 1000, 2500, 5000, None]` (`None` = full data)
 - `REPLICATE_SEEDS = [42..71]` (30 replicates per depth)
-- `MIN_PERC_GROUP = 0.95`, `CAPTURE_RATE = 0.25`
+- `MIN_PERC_GROUP = 0.95`, `CAPTURE_RATE = 0.25` (the cHDC cardiac pilot was
+  sequenced on the 10x GEM-X platform)
 
 ## Software versions
 

@@ -55,7 +55,7 @@ DEPTHS = [100, 250, 500, 1000, 2500, 5000, None]
 REPLICATE_SEEDS = [42 + i for i in range(30)]
 
 MIN_PERC_GROUP = 0.95  # matches the value used for the project's main dispersion CSVs
-CAPTURE_RATE   = 0.25  # 10x Chromium v3 assumption used throughout this project
+CAPTURE_RATE   = 0.25  # cHDC cardiac pilot was sequenced on the 10x GEM-X platform
 
 
 # ── Logging ────────────────────────────────────────────────────────────────────
