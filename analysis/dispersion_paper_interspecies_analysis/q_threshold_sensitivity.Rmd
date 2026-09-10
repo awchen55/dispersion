@@ -1,0 +1,555 @@
+---
+title: "Sensitivity of DD Gene Calls to Memento Capture-Efficiency (q)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+date: "2026-07-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Overview
+
+`q` is the assumed UMI capture efficiency passed to `memento` (see
+`memento_q` in `de_dd_snakemake/config.yaml`). Each value of `q` produces its
+own `DD_DE_interspecies_results.csv` under
+`data/dd_de_results/q_thresholds/q{q}/`, with its own gene universe (memento's
+internal filtering means more/fewer genes pass through as `q` changes).
+
+This notebook asks: **how sensitive are the diploid DD gene calls, and the
+recapitulated DD gene calls, to the choice of q?** For each cell type we
+compare the DD gene sets across `q = 0.05, 0.1, 0.15, 0.2` and report what
+fraction of genes are called consistently.
+
+- **Diploid DD**: `dd.lfsr.diploid.{ct} < 0.05`
+- **Recapitulated DD**: diploid DD AND `dd.lfsr.allotetraploid.{ct} < 0.05`
+  AND same-sign logFC (diploid vs. allotetraploid)
+
+Because the gene universe differs across `q`, all comparisons are done by
+matching on gene name, not row position.
+
+---
+
+## Load Data
+
+Reads all four `q` versions of the master DD/DE table into one named list
+(`dd_tables[["0.05"]]`, `dd_tables[["0.1"]]`, ...) and sets up shared paths
+and helper functions used throughout the rest of the document.
+
+```{r load}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(tibble)
+
+q_values <- c("0.05", "0.1", "0.15", "0.2")
+
+# Master DD/DE table location for a given q (mt/rb genes removed, mean-
+# expression cutoff already applied upstream -- see
+# code/de_dd_snakemake_mt_rb_mean_filtered/README.md).
+path_for_q <- function(q) {
+  sprintf("/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q%s/DD_DE_interspecies_results.csv", q)
+}
+
+dd_tables <- setNames(lapply(q_values, function(q) read.csv(path_for_q(q), check.names = FALSE)), q_values)
+
+# Sanity check: gene universe size should grow (or stay flat) as q becomes
+# more permissive.
+for (q in q_values) {
+  cat(sprintf("q = %-5s : %d genes x %d columns\n", q, nrow(dd_tables[[q]]), ncol(dd_tables[[q]])))
+}
+
+results_path <- '/project/gilad/awchen55/mechanism/results/dispersion_paper/'
+
+# All retention/fate plots (Section 4 below) are saved here
+q_sensitivity_path <- paste0(results_path, "supplement/q_sensitivity/")
+dir.create(q_sensitivity_path, recursive = TRUE, showWarnings = FALSE)
+
+# Consistent naming for every retention/fate plot: which gene set, which
+# baseline q, which lfsr significance threshold.
+retention_fname <- function(kind, baseline_q, lfsr) {
+  sprintf("%s_dd_retained_baseline_q%s_lfsr%s.pdf", kind, baseline_q, lfsr)
+}
+```
+
+Determines which cell types are available for diploid DD, allotetraploid DD,
+and their intersection (the set eligible for recapitulation), from the
+column names of the q=0.2 table.
+
+```{r celltypes}
+get_celltypes <- function(df, prefix) {
+  cols <- colnames(df)[grepl(paste0("^", prefix, "\\."), colnames(df))]
+  unique(sub(paste0("^", prefix, "\\."), "", cols))
+}
+
+# Cell type sets are identical across q values (verified), so just use q[1]
+celltypes_dip  <- get_celltypes(dd_tables[[q_values[1]]], "dd.lfsr.diploid")
+celltypes_allo <- get_celltypes(dd_tables[[q_values[1]]], "dd.lfsr.allotetraploid")
+celltypes_recap <- intersect(celltypes_dip, celltypes_allo)
+
+cat("Diploid cell types:  ", length(celltypes_dip), "\n")
+cat("Allo cell types:     ", length(celltypes_allo), "\n")
+cat("Shared (for recap):  ", length(celltypes_recap), "\n")
+
+# Cell type names come from column names, where spaces were converted to
+# periods (e.g. "Cardiac mesoderm cells" -> "Cardiac.mesoderm.cells"). Use
+# the dotted form for column lookups, and pretty_ct() to convert back to
+# spaces for anything shown in a table or plot.
+pretty_ct <- function(x) gsub("\\.", " ", x, fixed = FALSE)
+```
+
+---
+
+## 1. Gene Universe Size per q
+
+How many genes pass memento's internal filtering at each `q`, before any DD
+significance test is applied -- the denominator that everything else in
+this document is drawn from.
+
+```{r universe_size}
+universe_df <- tibble(
+  q     = q_values,
+  genes = sapply(q_values, function(q) nrow(dd_tables[[q]]))
+)
+print(universe_df)
+
+ggplot(universe_df, aes(x = q, y = genes)) +
+  geom_col(fill = "#4575b4", width = 0.6) +
+  labs(title = "Gene universe size per q", x = "q (memento capture efficiency)",
+       y = "Number of genes in table") +
+  theme_bw()
+```
+
+---
+
+## 2. Diploid DD Gene Sets
+
+Builds the diploid DD gene set (`dd.lfsr.diploid.{ct} < 0.05`) for every
+cell type at every `q`, and tabulates how the count changes with `q`.
+
+```{r dip_dd_sets}
+get_dd_genes <- function(df, ct) {
+  col <- paste0("dd.lfsr.diploid.", ct)
+  if (!col %in% colnames(df)) return(character(0))
+  df$gene[!is.na(df[[col]]) & df[[col]] < 0.05]
+}
+
+# Named list: dip_dd_sets[[q]][[ct]] -> character vector of gene names
+dip_dd_sets <- setNames(lapply(q_values, function(q) {
+  setNames(lapply(celltypes_dip, function(ct) get_dd_genes(dd_tables[[q]], ct)), celltypes_dip)
+}), q_values)
+
+dip_dd_counts <- expand_grid(q = q_values, celltype = celltypes_dip) |>
+  rowwise() |>
+  mutate(n_dd = length(dip_dd_sets[[q]][[celltype]])) |>
+  ungroup() |>
+  mutate(celltype = pretty_ct(celltype))
+
+dip_dd_counts |>
+  pivot_wider(names_from = q, values_from = n_dd, names_prefix = "q") |>
+  print(n = Inf)
+```
+
+### DD gene count vs. q, per cell type
+
+Same table as above, plotted as a line per cell type so the direction and
+size of the trend (almost always: more permissive q -> more DD genes) is
+visible at a glance.
+
+```{r dip_dd_count_plot, fig.width=10, fig.height=7}
+ggplot(dip_dd_counts, aes(x = as.numeric(q), y = n_dd, group = celltype, colour = celltype)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  labs(title = "Diploid DD gene count vs. q", x = "q", y = "Number of DD genes") +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "none") +
+  facet_wrap(~celltype, scales = "free_y", ncol = 5)
+```
+
+---
+
+
+## 3. Recapitulated DD Gene Sets
+
+Same idea as Section 2, but for the recapitulated DD gene set: diploid DD
+AND allotetraploid DD (`lfsr < 0.05` in both) with matching effect-size
+sign, at every `q`.
+
+```{r recap_dd_sets}
+get_recap_genes <- function(df, ct) {
+  lfsr_dip  <- paste0("dd.lfsr.diploid.", ct)
+  lfsr_allo <- paste0("dd.lfsr.allotetraploid.", ct)
+  lfc_dip   <- paste0("dd.logFC.diploid.", ct)
+  lfc_allo  <- paste0("dd.logFC.allotetraploid.", ct)
+
+  missing <- setdiff(c(lfsr_dip, lfsr_allo, lfc_dip, lfc_allo), colnames(df))
+  if (length(missing) > 0) return(character(0))
+
+  dd_flag   <- !is.na(df[[lfsr_dip]])  & df[[lfsr_dip]]  < 0.05
+  allo_flag <- !is.na(df[[lfsr_allo]]) & df[[lfsr_allo]] < 0.05
+  sign_flag <- sign(df[[lfc_dip]]) == sign(df[[lfc_allo]])
+
+  df$gene[dd_flag & allo_flag & sign_flag]
+}
+
+recap_dd_sets <- setNames(lapply(q_values, function(q) {
+  setNames(lapply(celltypes_recap, function(ct) get_recap_genes(dd_tables[[q]], ct)), celltypes_recap)
+}), q_values)
+
+recap_dd_counts <- expand_grid(q = q_values, celltype = celltypes_recap) |>
+  rowwise() |>
+  mutate(n_recap = length(recap_dd_sets[[q]][[celltype]])) |>
+  ungroup() |>
+  mutate(celltype = pretty_ct(celltype))
+
+recap_dd_counts |>
+  pivot_wider(names_from = q, values_from = n_recap, names_prefix = "q") |>
+  print(n = Inf)
+```
+
+### Recapitulated DD gene count vs. q, per cell type
+
+Same trend line as the diploid version above, for the recapitulated gene
+set.
+
+```{r recap_dd_count_plot, fig.width=10, fig.height=7}
+ggplot(recap_dd_counts, aes(x = as.numeric(q), y = n_recap, group = celltype, colour = celltype)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  labs(title = "Recapitulated DD gene count vs. q", x = "q", y = "Number of recapitulated DD genes") +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "none") +
+  facet_wrap(~celltype, scales = "free_y", ncol = 5)
+```
+
+---
+
+
+## 4. Retention of q = 0.2 DD Genes as q Decreases
+
+Uses `q = 0.2` (the most permissive value, largest gene universe) as the
+baseline. For each baseline DD gene, at each stricter q it falls into
+exactly one of three outcomes:
+
+- **Retained** — still significant DD (`lfsr < 0.05`) at that q
+- **Lost — no longer significant** — the gene is still in that q's gene
+  table (it was tested) but is no longer significant
+- **Lost — dropped from smaller universe** — the gene isn't in that q's
+  gene table at all (memento's filtering excluded it before any
+  significance test could run)
+
+These three percentages always sum to 100% of the baseline gene set, so
+they're shown stacked on the same chart: how much of the loss going from
+q = 0.2 down to q = 0.05 is "real" (no longer significant) vs. an
+artifact of the shrinking gene universe.
+
+```{r retention_setup}
+baseline_q <- "0.2"
+other_qs   <- setdiff(q_values, baseline_q)
+
+# For one gene set (diploid or recapitulated) and one baseline q, classifies
+# every baseline-q DD gene's fate at each stricter q into Retained / Lost
+# (no longer significant) / Dropped (outside that q's gene universe), then
+# reshapes to one row per (celltype, q) with both counts and percentages.
+retention_breakdown <- function(sets_by_q, tables, celltypes, baseline_q, other_qs) {
+  map_dfr(celltypes, function(ct) {
+    baseline_genes <- sets_by_q[[baseline_q]][[ct]]
+    n_baseline     <- length(baseline_genes)
+
+    bind_rows(
+      tibble(celltype = ct, q = baseline_q, n_baseline = n_baseline,
+             n_retained = n_baseline, n_lost_not_sig = 0L, n_lost_dropped = 0L,
+             retention_pct = 100, lost_not_sig_pct = 0, lost_dropped_pct = 0),
+      map_dfr(other_qs, function(q) {
+        universe_q      <- tables[[q]]$gene
+        retained        <- intersect(baseline_genes, sets_by_q[[q]][[ct]])
+        dropped         <- setdiff(baseline_genes, universe_q)
+        lost_not_sig    <- setdiff(setdiff(baseline_genes, retained), dropped)
+
+        tibble(
+          celltype         = ct, q = q, n_baseline = n_baseline,
+          n_retained       = length(retained),
+          n_lost_not_sig   = length(lost_not_sig),
+          n_lost_dropped   = length(dropped),
+          retention_pct    = if (n_baseline > 0) 100 * length(retained)     / n_baseline else NA_real_,
+          lost_not_sig_pct = if (n_baseline > 0) 100 * length(lost_not_sig) / n_baseline else NA_real_,
+          lost_dropped_pct = if (n_baseline > 0) 100 * length(dropped)      / n_baseline else NA_real_
+        )
+      })
+    )
+  })
+}
+
+dip_retention   <- retention_breakdown(dip_dd_sets,   dd_tables, celltypes_dip,   baseline_q, other_qs) |>
+  mutate(celltype = pretty_ct(celltype))
+recap_retention <- retention_breakdown(recap_dd_sets, dd_tables, celltypes_recap, baseline_q, other_qs) |>
+  mutate(celltype = pretty_ct(celltype))
+
+celltype_order_by_n <- function(retention_df) {
+  retention_df |> distinct(celltype, n_baseline) |> arrange(desc(n_baseline)) |> pull(celltype)
+}
+
+to_long <- function(retention_df) {
+  ct_order <- celltype_order_by_n(retention_df)
+
+  # Label each cell type's facet with its q=0.2 baseline gene count (e.g.
+  # "Cardiomyocytes (n=45)") so the baseline denominator behind the % values
+  # is visible directly on the plot.
+  label_lookup <- retention_df |> distinct(celltype, n_baseline)
+  label_map <- setNames(sprintf("%s (n=%d)", label_lookup$celltype, label_lookup$n_baseline),
+                         label_lookup$celltype)
+  ct_order_labeled <- unname(label_map[ct_order])
+
+  retention_df |>
+    select(celltype, q, retention_pct, lost_not_sig_pct, lost_dropped_pct) |>
+    mutate(celltype = unname(label_map[celltype])) |>
+    pivot_longer(cols = c(retention_pct, lost_not_sig_pct, lost_dropped_pct),
+                 names_to = "status", values_to = "pct") |>
+    mutate(status = recode(status,
+             retention_pct    = "Retained",
+             lost_not_sig_pct = "No Longer Significant",
+             lost_dropped_pct = "Dropped"),
+           status = factor(status, levels = c("Dropped",
+                                               "No Longer Significant",
+                                               "Retained")),
+           q = factor(q, levels = q_values),
+           # Facets ordered by number of baseline DD genes (descending), not alphabetically
+           celltype = factor(celltype, levels = ct_order_labeled))
+}
+
+status_colours <- c("Retained"         = "#4575b4",
+                     "No Longer Significant"         = "#fdae61",
+                     "Dropped" = "grey70")
+
+# Facet strip labels include a "(n=NNN)" suffix and, for several cell types,
+# a long name (e.g. "Bronchiolar and alveolar epithelial cells") -- with
+# ncol=5 each facet panel is narrow, so wrap onto at most two lines (width
+# chosen so even the longest label -- "Bronchiolar and alveolar epithelial
+# cells (n=NNNN)" -- fits in two) rather than letting ggplot truncate the
+# label or wrap it across three or more lines.
+wrap_ct_label <- function(x, width = 26) stringr::str_wrap(x, width = width)
+
+cat("=== Diploid DD — retention breakdown relative to q=0.2 baseline ===\n")
+dip_retention |> arrange(celltype, desc(as.numeric(q))) |> print(n = Inf)
+```
+
+### Number of diploid DD genes at q = 0.2 (baseline)
+
+The baseline gene set size for each cell type -- the denominator behind
+every retention percentage below. Cell types with a small baseline set will
+naturally show noisier retention percentages than large ones.
+
+```{r retention_baseline_bar, fig.width=9, fig.height=5}
+dip_baseline_counts <- dip_retention |> filter(q == baseline_q) |> distinct(celltype, n_baseline)
+
+ggplot(dip_baseline_counts, aes(x = reorder(celltype, -n_baseline), y = n_baseline)) +
+  geom_col(fill = "#4575b4", width = 0.75) +
+  labs(title = "Number of diploid DD genes at q = 0.2 (baseline)",
+       x = NULL, y = "Number of DD genes") +
+  theme_bw(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+```
+
+### Fate of q = 0.2 DD genes vs. q, per cell type (diploid DD)
+
+The Retained / No Longer Significant / Dropped breakdown from the setup
+chunk above, one stacked bar per q, faceted by cell type (ordered by
+descending baseline gene count).
+
+```{r retention_stack_dip, fig.width=11, fig.height=8}
+dip_retention_plot <- ggplot(to_long(dip_retention), aes(x = q, y = pct, fill = status)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = status_colours) +
+  labs(title = "",
+       x = "q", y = "% of diploid DD genes (q=0.2)", fill = NULL) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top", axis.text.x = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~celltype, ncol = 5, labeller = labeller(celltype = wrap_ct_label))
+dip_retention_plot
+# ggplot2::ggsave(filename = paste0(q_sensitivity_path, retention_fname("diploid", "0.2", "0.05")),
+#                 plot = dip_retention_plot, device = "pdf", width = 14, height = 7, units = "in")
+```
+
+### Recapitulated DD — same analysis
+
+The same two plots (baseline count, then Retained/Lost/Dropped fate) for
+the recapitulated gene set instead of diploid DD.
+
+```{r retention_baseline_bar_recap, fig.width=9, fig.height=5}
+recap_baseline_counts <- recap_retention |> filter(q == baseline_q) |> distinct(celltype, n_baseline)
+
+ggplot(recap_baseline_counts, aes(x = reorder(celltype, -n_baseline), y = n_baseline)) +
+  geom_col(fill = "#d73027", width = 0.75) +
+  labs(title = "Number of recapitulated DD genes at q = 0.2 (baseline)",
+       x = NULL, y = "Number of DD genes") +
+  theme_bw(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+```
+
+```{r retention_stack_recap, fig.width=11, fig.height=8}
+allo_retention_plot <- ggplot(to_long(recap_retention), aes(x = q, y = pct, fill = status)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = status_colours) +
+  labs(title = "",
+       x = "q", y = "% of recapitulated DD genes (q=0.2)", fill = NULL) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top", axis.text.x = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~celltype, ncol = 5, labeller = labeller(celltype = wrap_ct_label))
+allo_retention_plot
+# ggplot2::ggsave(filename = paste0(q_sensitivity_path, retention_fname("recap", "0.2", "0.05")),
+# plot = allo_retention_plot, device = "pdf", width = 14, height = 7, units = "in")
+```
+
+
+
+### Same analysis, baseline q = 0.05
+
+Same retention breakdown as above (reusing `retention_breakdown()`), but
+with `q = 0.05` (the strictest value, smallest gene universe) as the
+baseline instead of `q = 0.2`. Because the gene universe *grows* at more
+permissive q, genes can also be called DD at a larger q that weren't even
+part of the q=0.05 baseline set ("Gained"). Unlike the q=0.2 plots above,
+these show the **nominal number of genes** on the y-axis (not %), stacked as
+Retained / No Longer Significant / Gained — so the bar height is the size of
+the union of the q=0.05 baseline set and each q's DD set, split by which of
+the three categories each gene falls into. "Dropped" is omitted here since
+q=0.05 is already the smallest universe, so it is expected to be
+rare/absent.
+
+```{r retention_setup_q005}
+baseline_q_005 <- "0.05"
+other_qs_005   <- setdiff(q_values, baseline_q_005)
+
+dip_retention_q005   <- retention_breakdown(dip_dd_sets,   dd_tables, celltypes_dip,   baseline_q_005, other_qs_005) |>
+  mutate(celltype = pretty_ct(celltype))
+recap_retention_q005 <- retention_breakdown(recap_dd_sets, dd_tables, celltypes_recap, baseline_q_005, other_qs_005) |>
+  mutate(celltype = pretty_ct(celltype))
+
+# Genes called DD at a given (more permissive) q that were NOT in the q=0.05
+# baseline DD set at all -- i.e. gained on top of the baseline, not part of
+# its retained/lost breakdown (which sums to 100% of the baseline set).
+genes_gained <- function(sets_by_q, celltypes, baseline_q, other_qs) {
+  map_dfr(celltypes, function(ct) {
+    baseline_genes <- sets_by_q[[baseline_q]][[ct]]
+    n_baseline     <- length(baseline_genes)
+
+    bind_rows(
+      tibble(celltype = ct, q = baseline_q, n_gained = 0L, gained_pct = 0),
+      map_dfr(other_qs, function(q) {
+        gained <- setdiff(sets_by_q[[q]][[ct]], baseline_genes)
+        tibble(celltype   = ct, q = q,
+               n_gained   = length(gained),
+               gained_pct = if (n_baseline > 0) 100 * length(gained) / n_baseline else NA_real_)
+      })
+    )
+  })
+}
+
+dip_gained_q005   <- genes_gained(dip_dd_sets,   celltypes_dip,   baseline_q_005, other_qs_005) |>
+  mutate(celltype = pretty_ct(celltype))
+recap_gained_q005 <- genes_gained(recap_dd_sets, celltypes_recap, baseline_q_005, other_qs_005) |>
+  mutate(celltype = pretty_ct(celltype))
+
+cat("=== Diploid DD — retention breakdown relative to q=0.05 baseline ===\n")
+dip_retention_q005 |> arrange(celltype, as.numeric(q)) |> print(n = Inf)
+
+cat("\n=== Diploid DD — genes gained relative to q=0.05 baseline ===\n")
+dip_gained_q005 |> arrange(celltype, as.numeric(q)) |> print(n = Inf)
+
+# Nominal gene counts (not %), stacked as Retained / No Longer Significant /
+# Gained. Bar height = size of the union of the q=0.05 baseline DD set and
+# the current q's DD set.
+gene_count_colours <- c("Retained"              = "#4575b4",
+                         "No Longer Significant"  = "#fdae61",
+                         "Gained"                = "#1a9850",
+                         "Dropped"               = "grey70")
+
+to_counts_long <- function(retention_df, gained_df = NULL) {
+  ct_order <- celltype_order_by_n(retention_df)
+
+  if (is.null(gained_df)) {
+    # No "Gained" category -- appropriate for baseline q=0.2 (the most
+    # permissive baseline), where every other q is stricter and Section 7's
+    # original design only ever tracked the fate of the baseline genes
+    # themselves: Retained / No Longer Significant / Dropped
+    # (the last of which is non-trivial here, unlike for the q=0.05 baseline,
+    # since stricter q's genuinely have smaller gene universes).
+    out <- retention_df |>
+      select(celltype, q, n_retained, n_lost_not_sig, n_lost_dropped)
+    long_cols <- c("n_retained", "n_lost_not_sig", "n_lost_dropped")
+    status_levels <- c("Dropped", "No Longer Significant", "Retained")
+  } else {
+    out <- retention_df |>
+      select(celltype, q, n_retained, n_lost_not_sig) |>
+      left_join(gained_df |> select(celltype, q, n_gained), by = c("celltype", "q"))
+    long_cols <- c("n_retained", "n_lost_not_sig", "n_gained")
+    status_levels <- c("No Longer Significant", "Gained", "Retained")
+  }
+
+  out |>
+    pivot_longer(cols = all_of(long_cols), names_to = "status", values_to = "n_genes") |>
+    mutate(status = recode(status,
+             n_retained     = "Retained",
+             n_lost_not_sig = "No Longer Significant",
+             n_gained       = "Gained",
+             n_lost_dropped = "Dropped"),
+           status = factor(status, levels = status_levels),
+           q = factor(q, levels = q_values),
+           celltype = factor(celltype, levels = ct_order))
+}
+```
+
+### Fate of q = 0.05 DD genes vs. q, per cell type (diploid DD)
+
+Retained / No Longer Significant / Gained, as nominal gene counts, one
+stacked bar per q, faceted by cell type.
+
+```{r retention_stack_dip_q005, fig.width=11, fig.height=8}
+dip_retention_plot_q005 <- ggplot(to_counts_long(dip_retention_q005, dip_gained_q005),
+                                   aes(x = q, y = n_genes, fill = status)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = gene_count_colours) +
+  labs(title = "",
+       x = "q", y = "# of diploid DD genes", fill = NULL) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top", axis.text.x = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~celltype, ncol = 5, labeller = labeller(celltype = wrap_ct_label))
+dip_retention_plot_q005
+# ggplot2::ggsave(filename = paste0(q_sensitivity_path, retention_fname("diploid", "0.05", "0.05")),plot = dip_retention_plot_q005, device = "pdf", width = 14, height = 7, units = "in")
+```
+
+### Recapitulated DD — same analysis (q = 0.05 baseline)
+
+Same q=0.05-baseline fate breakdown, for the recapitulated gene set.
+
+```{r retention_stack_recap_q005, fig.width=11, fig.height=8}
+allo_retention_plot_q005 <- ggplot(to_counts_long(recap_retention_q005, recap_gained_q005),
+                                    aes(x = q, y = n_genes, fill = status)) +
+  geom_col(width = 0.8) +
+  scale_fill_manual(values = gene_count_colours) +
+  labs(title = "",
+       x = "q", y = "# of recapitulated DD genes", fill = NULL) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "top", axis.text.x = element_text(size = 8),
+        strip.text = element_text(size = 8)) +
+  facet_wrap(~celltype, ncol = 5, labeller = labeller(celltype = wrap_ct_label))
+allo_retention_plot_q005
+# ggplot2::ggsave(filename = paste0(q_sensitivity_path, retention_fname("recap", "0.05", "0.05")), plot = allo_retention_plot_q005, device = "pdf", width = 14, height = 7, units = "in")
+```
+
+---
+
+## Session Info
+
+```{r session-info, echo=FALSE}
+sessionInfo()
+```
+

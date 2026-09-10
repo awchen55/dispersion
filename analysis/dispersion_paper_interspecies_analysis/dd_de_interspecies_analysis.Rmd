@@ -1,0 +1,2647 @@
+---
+title: "DD Interspecies Analysis"
+output: html_document
+date: "2026-03-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Results and Packages
+
+```{r}
+library(Seurat)
+library(SeuratObject)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(Matrix)
+library(purrr)
+library(ggpubr)
+library(stringr)
+library(scales)
+```
+
+We load DD results.
+```{r}
+path_data <- '/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/'
+results_path <- '/project/gilad/awchen55/mechanism/results/dispersion_paper/'
+
+dd_results <- read.csv(paste0(path_data,"DD_DE_interspecies_results.csv"), check.names = FALSE)
+head(dd_results)
+
+round_up_signif <- function(p, digits = 1) {
+  
+  if (p < 2e-16) {
+    return("2 %*% 10^{-16}")
+  }
+  
+  # round up
+  if (p != 0) {
+    expo  <- floor(log10(p))
+    scale <- 10^(expo - digits + 1)
+    p <- ceiling(p / scale) * scale
+  }
+  
+  # force decimal formatting
+  if (p >= 1e-4) {
+    dec <- min(max(0, -floor(log10(p))), 4)
+    return(formatC(p, format = "f", digits = dec))
+  }
+  
+  # scientific notation
+  expo <- floor(log10(p))
+  base <- round(p / 10^expo, digits)
+  
+  paste0(base, " %*% 10^{", expo, "}")
+}
+```
+
+## Summary Tables
+
+### Number of DD Genes
+
+```{r}
+
+# vector of cell types
+
+celltypes2 <- c("Bronchiolar_and_alveolar_epithelial_cells",
+    "Cardiac_mesoderm_cells",
+    "Cardiomyocytes",
+    "Ciliated_epithelial_cells",
+    "ENS_glia",
+    "Epicardial_fat_cells",
+    "Glioblast",
+    "Goblet_cells",
+    "Hepatoblasts",
+    "Intestinal_epithelial_cells",
+    "Metanephric_cells",
+    "Neuroblast",
+    "Neuron",
+    "Neuronal_IPC",
+    "Radial_glia",
+    "Retinal_neurons",
+    "Squamous_epithelial_cells",
+    "Stromal_cells",
+    "Vascular_endothelial_cells",
+    "iPSCs")
+
+celltypes <- gsub("_", ".", celltypes2)
+celltypes3 <- celltypes
+celltypes_display <- gsub("\\.", " ", celltypes)
+
+summary_table <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col  <- paste0("dd.lfsr.diploid.", ct)
+  recap_col <- paste0("dd.recapitulated.same.sign.", ct)
+
+  dd_flag <- dd_results[[lfsr_col]] < 0.05
+
+  dd_total <- sum(dd_flag, na.rm = TRUE)
+  recap_total <- sum(dd_flag & dd_results[[recap_col]] == 1, na.rm = TRUE)
+
+  tibble::tibble(
+    CellType = gsub("\\.", " ", ct),
+    `DD Genes` = dd_total,
+    Recapitulated = recap_total,
+    `% Recapitulated` = recap_total / dd_total
+  )
+})
+
+summary_table
+```
+
+
+### Plot of DD Genes
+
+Number of DD genes (diploid LFSR < 0.05) per cell type, ordered by
+descending total. Each bar is split into genes that are also recapitulated
+in the allotetraploid (LFSR < 0.05 in both diploid and allotetraploid, same
+effect-size sign; light blue) versus genes that are diploid-DD only (grey).
+
+```{r}
+
+celltypes_space <- c(
+    "Radial glia",
+  "Cardiomyocytes",
+  "Neuroblast",
+  "iPSCs",
+  "Retinal neurons",
+  "Stromal cells",
+  "Vascular endothelial cells",
+  "Metanephric cells",
+  "Squamous epithelial cells",
+  "ENS glia",
+  "Goblet cells",
+  "Bronchiolar and alveolar epithelial cells",
+  "Cardiac mesoderm cells",
+  "Neuronal IPC",
+  "Hepatoblasts",
+  "Glioblast",
+  "Intestinal epithelial cells",
+  "Neuron",
+  "Epicardial fat cells",
+  "Ciliated epithelial cells"
+)
+
+celltypes_dot <- gsub(" ", ".", celltypes_space)
+
+df_totals <- purrr::map_dfr(seq_along(celltypes_space), function(i) {
+
+  ct_label <- celltypes_space[i]
+  ct_col   <- celltypes_dot[i]
+
+  diploid_lfsr_col <- paste0("dd.lfsr.diploid.", ct_col)
+  tetra_lfsr_col   <- paste0("dd.lfsr.allotetraploid.", ct_col)
+
+  diploid_logfc_col <- paste0("dd.logFC.diploid.", ct_col)
+  tetra_logfc_col   <- paste0("dd.logFC.allotetraploid.", ct_col)
+
+  dd_flag <- !is.na(dd_results[[diploid_lfsr_col]]) &
+    dd_results[[diploid_lfsr_col]] < 0.05
+
+  recap_flag <- dd_flag &
+    !is.na(dd_results[[tetra_lfsr_col]]) &
+    dd_results[[tetra_lfsr_col]] < 0.05 &
+    !is.na(dd_results[[diploid_logfc_col]]) &
+    !is.na(dd_results[[tetra_logfc_col]]) &
+    sign(dd_results[[diploid_logfc_col]]) == sign(dd_results[[tetra_logfc_col]])
+
+  n_dd    <- sum(dd_flag, na.rm = TRUE)
+  n_recap <- sum(recap_flag, na.rm = TRUE)
+  n_not   <- n_dd - n_recap
+
+  tibble::tibble(
+    CellType = ct_label,
+    Not_Recapitulated = n_not,
+    Recapitulated = n_recap
+  )
+}) %>%
+  dplyr::mutate(
+    CellType = factor(CellType, levels = celltypes_space)
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(Not_Recapitulated, Recapitulated),
+    names_to = "List",
+    values_to = "DD_Genes"
+  ) %>%
+  dplyr::mutate(
+    List = factor(List, levels = c("Not_Recapitulated", "Recapitulated"))
+  )
+
+dd_totals_by_ct <- df_totals %>%
+  dplyr::group_by(CellType) %>%
+  dplyr::summarise(total = sum(DD_Genes), .groups = "drop")
+
+dd_gene_plot <- ggplot2::ggplot(
+  df_totals,
+  ggplot2::aes(x = CellType, y = DD_Genes, fill = List)
+) +
+  ggplot2::geom_col() +
+  # NOTE: previously hardcoded to limits = c(0, 2400) via scale_y_continuous(),
+  # which *drops* data outside the range rather than just zooming the view --
+  # this silently truncated the "Not Recapitulated" segment (stacked on top)
+  # for any cell type whose total DD gene count exceeded 2400 (Radial glia,
+  # ENS glia, Neuronal IPC all do). coord_cartesian() zooms without dropping data.
+  ggplot2::coord_cartesian(ylim = c(0, max(dd_totals_by_ct$total, na.rm = TRUE) * 1.05)) +
+  ggplot2::scale_y_continuous(
+    breaks = seq(0, 3000, by = 500),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(
+    x = "",
+    y = "# DD genes (LFSR < 0.05)",
+    title = ""
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+  panel.grid = ggplot2::element_blank(),
+  axis.line = ggplot2::element_line(color = "black", linewidth = 0.4),
+  panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.8),
+  axis.title = ggplot2::element_text(size = 14),
+  axis.text.x = ggplot2::element_text(size = 12, angle = 45, hjust = 1),
+  axis.text.y = ggplot2::element_text(size = 12),
+  legend.position = c(0.99, 0.99),        # top-right inside
+  legend.justification = c("right", "top"),
+  legend.title = ggplot2::element_blank(),
+  legend.background = ggplot2::element_rect(fill = NA, color = NA),
+  legend.text = ggplot2::element_text(size = 12),
+  legend.key.size = grid::unit(0.4, "cm")
+) +
+  ggplot2::scale_fill_manual(
+    values = c(
+      "Not_Recapitulated" = "gray87",
+      "Recapitulated" = "lightskyblue"
+    ),
+    labels = c(
+      "Not_Recapitulated" = "Not Recapitulated",
+      "Recapitulated" = "Recapitulated"
+    )
+  )
+
+dd_gene_plot
+# ggplot2::ggsave(filename = paste0(results_path, "main/recapitulateed_dd_genes.pdf"), plot = dd_gene_plot,  device = "pdf", width = 8, height = 5, units = "in")
+```
+
+
+### Recapitulation rate
+
+Load metadata from allotetraploid
+```{r}
+path <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+metadata_tetraploid <- read.csv(paste0(path,'tetraploid_metadata.csv'))
+```
+
+For each cell type, the recapitulation rate (fraction of diploid DD genes
+that are also DD-significant in the allotetraploid with the same
+effect-size sign) plotted alongside the number of allotetraploid cells
+available for that cell type (labeled above each bar), to give a sense of
+whether cell types with fewer cells also show lower recapitulation rates.
+
+```{r}
+recap_plot_df <- metadata_tetraploid %>%
+  dplyr::filter(
+    stringr::str_starts(cell_barcode, "human_"),
+    celltype != "unassigned"
+  ) %>%
+  dplyr::mutate(
+    CellType = gsub("_", " ", celltype)
+  ) %>%
+  dplyr::filter(CellType %in% celltypes_display) %>%
+  dplyr::count(CellType, name = "n_cells") %>%
+  dplyr::right_join(summary_table, by = "CellType") %>%
+  dplyr::mutate(
+    n_cells = tidyr::replace_na(n_cells, 0),
+    CellType = factor(CellType, levels = CellType[order(-n_cells)])
+  )
+
+recap_plot <- recap_plot_df %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = CellType, y = `% Recapitulated`)
+  ) +
+  ggplot2::geom_col(fill = "#4DBBD5") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n_cells),
+    vjust = -0.4,
+    size = 4
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 1),
+    expand = c(0, 0.02)
+  ) +
+  ggplot2::labs(
+    x = "",
+    y = "Recapitulation rate",
+    title = ""
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    axis.line = ggplot2::element_line(color = "black", linewidth = 0.4),
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text.x = ggplot2::element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y = ggplot2::element_text(size = 12)
+  )
+
+recap_plot
+```
+
+Recapitulation rate plotted directly against allotetraploid cell number
+(rather than showing cell type on the x-axis as above), to see whether the
+two are related in general across cell types. Labeled points are the
+top/bottom 3 cell types by recapitulation rate plus the top 3 by cell
+count, so both the extremes and the largest cell types are identifiable.
+
+```{r}
+# top/bottom 3 by recapitulation rate + top 3 by cell count, for ggrepel
+# labeling in the scatter below.
+label_df <- recap_plot_df %>%
+  dplyr::filter(!is.na(`% Recapitulated`)) %>%
+  dplyr::arrange(desc(`% Recapitulated`)) %>%
+  dplyr::slice(c(1:3, (n()-2):n())) %>%
+  dplyr::bind_rows(
+    recap_plot_df %>%
+      dplyr::arrange(desc(n_cells)) %>%
+      dplyr::slice(1:3)
+  ) %>%
+  dplyr::distinct()
+
+recap_scatter <- ggplot(recap_plot_df, aes(x = n_cells, y = `% Recapitulated`)) +
+  geom_point(size = 2, color = "#4DBBD5") +
+
+  ggrepel::geom_text_repel(
+    data = label_df,
+    aes(label = CellType),
+    size = 3,
+    max.overlaps = Inf,
+    box.padding = 0.3,
+    point.padding = 0.2,
+    force = 2,
+    segment.color = "grey50"
+  ) +
+
+  scale_x_continuous(expand = ggplot2::expansion(mult = 0.03)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    expand = ggplot2::expansion(mult = 0.03)
+  ) +
+
+  labs(
+    x = "# allotetraploid cells",
+    y = "% recapitulated"
+  ) +
+
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+recap_scatter
+#ggplot2::ggsave(filename = paste0(results_path, "supplement/recapitulation_rate/recapitulation_rate_scatter.pdf"), plot = recap_scatter,  device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### Recapitulation rate vs. cell number (downsampling within one cell type)
+
+The scatter above compares % recapitulated across *different* cell types, which
+confounds cell number with everything else that differs between cell types
+(cell-type-specific biology, gene expression levels, etc). To isolate the
+effect of statistical power alone, we downsample **Radial glia** -- the
+largest allotetraploid cell type (47,437 hybrid cells) -- to smaller cell
+counts (100, 1,000, 2,000, 5,000, 8,000, 10,000, 16,000, 24,000, 32,000,
+40,000; 3 random-subsample replicates per size), rerun the production
+memento DD test + MASH refit at each size (see
+`downsample_recapitulation/submit_downsample_jobs.sh`), and recompute the
+recapitulation rate against the same (unchanged) diploid DD gene set used
+throughout this notebook. The full-data point reuses the already-computed
+production result from `summary_table` above -- no rerun needed.
+
+Replicate spread is noticeably wider at the smallest size (n=100: 0.7-1.1%)
+than at n>=1,000 (typically <15% relative spread), consistent with sampling
+noise on a small significant-gene count rather than a broken test (no NaNs
+or out-of-range values at any size).
+
+```{r}
+downsample_dir <- "/project/gilad/awchen55/mechanism/analysis/dd_de_analysis/downsample_recapitulation/downsample_recapitulation_rate_radia_glia/"
+
+downsample_files <- list.files(
+  downsample_dir,
+  pattern = "^recap_Radial_glia_n[0-9]+_rep[0-9]+\\.csv$",
+  full.names = TRUE
+)
+
+downsample_df <- purrr::map_dfr(downsample_files, read.csv)
+
+# full-data anchor point: already computed in summary_table, no rerun needed
+full_data_point <- summary_table %>%
+  dplyr::filter(CellType == "Radial glia") %>%
+  dplyr::transmute(
+    celltype = "Radial_glia",
+    n_cells = max(recap_plot_df$n_cells[recap_plot_df$CellType == "Radial glia"]),
+    replicate = 0L,
+    n_dd_diploid = `DD Genes`,
+    n_recap = Recapitulated,
+    pct_recap = `% Recapitulated`
+  )
+
+downsample_df <- dplyr::bind_rows(downsample_df, full_data_point) %>%
+  dplyr::arrange(n_cells)
+
+# CI on the mean recapitulation rate at each cell count, computed from the
+# actual spread across the (now 10) independent random-subsample replicates
+# at that size -- this reflects real downsampling variability, unlike a
+# binomial CI on a single point's proportion (which would be nonzero even
+# for the full, non-downsampled anchor point, where there is no resampling
+# and thus no variability to report -- exactly why that point gets no error
+# bar below: n_reps = 1 there, so sd/CI are undefined).
+downsample_summary <- downsample_df %>%
+  dplyr::group_by(n_cells) %>%
+  dplyr::summarise(
+    mean_pct_recap = mean(pct_recap),
+    sd_pct_recap   = sd(pct_recap),
+    n_reps         = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    se       = sd_pct_recap / sqrt(n_reps),
+    ci_lower = mean_pct_recap - stats::qt(0.975, n_reps - 1) * se,
+    ci_upper = mean_pct_recap + stats::qt(0.975, n_reps - 1) * se
+  )
+
+downsample_df
+```
+
+```{r}
+downsample_recap_plot <- ggplot2::ggplot(
+  downsample_df,
+  ggplot2::aes(x = n_cells, y = pct_recap)
+) +
+  ggplot2::geom_point(color = "grey60", size = 1, alpha = 0.7) +
+  ggplot2::geom_line(
+    data = downsample_summary,
+    ggplot2::aes(x = n_cells, y = mean_pct_recap),
+    color = "#4DBBD5",
+    linewidth = 1
+  ) +
+  ggplot2::geom_point(
+    data = downsample_summary,
+    ggplot2::aes(x = n_cells, y = mean_pct_recap),
+    color = "#4DBBD5",
+    size = 2
+  ) +
+  ggplot2::scale_x_continuous(
+    labels = scales::comma,
+    expand = ggplot2::expansion(mult = 0.05)
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 1),
+    expand = ggplot2::expansion(mult = 0.03)
+  ) +
+  ggplot2::labs(
+    x = "# allotetraploid cells (Radial glia, downsampled)",
+    y = "% recapitulated"
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    axis.line = ggplot2::element_line(color = "black"),
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text = ggplot2::element_text(size = 12)
+  )
+
+downsample_recap_plot
+#ggplot2::ggsave(filename = paste0(results_path, "supplement/recapitulation_rate/downsample_recapitulation_rate_radial_glia.pdf"), plot = downsample_recap_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+The 95% CI on the mean recapitulation rate at each downsampled size (computed
+from the actual spread across the 10 independent random-subsample replicates,
+not shown as error bars above since they are too narrow (~±0.003) to be
+visible against the plot's 0-1 y-axis). The full-data anchor point (47,437
+cells) has only 1 "replicate" (no resampling was performed on the production
+result), so no CI can be computed for it.
+
+```{r}
+downsample_summary %>%
+  dplyr::transmute(
+    `# Cells`       = scales::comma(n_cells),
+    `Mean % Recap`  = scales::percent(mean_pct_recap, accuracy = 0.1),
+    `SD`            = ifelse(is.na(sd_pct_recap), "--", scales::percent(sd_pct_recap, accuracy = 0.01)),
+    `# Replicates`  = n_reps,
+    `95% CI`        = ifelse(
+      is.na(ci_lower), "--",
+      paste0(scales::percent(ci_lower, accuracy = 0.1), " – ", scales::percent(ci_upper, accuracy = 0.1))
+    )
+  )
+```
+
+
+## Examples of DD Genes
+
+We load the annotated diploid Seurat object (all cell types, all species;
+see `cell_annotations_diploid_lines.Rmd`).
+
+The object also carries a "sketch" assay (Seurat v5, BPCells-backed on-disk
+matrix), so BPCells must be installed and discoverable on this session's
+library path -- see `.libPaths()` below.
+```{r}
+# BPCells is needed to load the object's on-disk "sketch" assay. Make sure
+# it's discoverable regardless of which library path resolves first in this
+# session.
+.libPaths(c("/project/gilad/awchen55/Rlibs/R4-4-1", .libPaths()))
+
+path_seurat <- '/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/'
+diploid_crossfilt_data <- readRDS(paste0(path_seurat, 'combined_1kFeatures_integrated_annotated.rds'))
+
+DefaultAssay(diploid_crossfilt_data) <- "RNA"
+diploid_crossfilt_data[["sketch"]] <- NULL
+diploid_crossfilt_data <- JoinLayers(diploid_crossfilt_data)
+```
+
+### DD but not DE
+
+Example gene illustrating differential dispersion in the absence of
+differential expression: *SESN3* in Neuroblast. The density plot below
+shows the human and chimpanzee expression distributions for this gene
+overlapping in location (not DE) while differing in shape/spread (DD) --
+i.e. the two species show no detectable shift in mean expression, but a
+clear difference in cell-to-cell variability.
+
+```{r}
+ct <- "Neuroblast"
+# Subset to Neuroblast cells only
+ct_obj <- subset(diploid_crossfilt_data, subset = celltype == ct)
+
+# Library size per cell. This object's RNA counts layer is BPCells-backed
+# on disk, which supports colSums() natively (streamed, no full
+# materialization needed) but doesn't register coercion to every standard
+# Matrix class (e.g. as(., "CsparseMatrix") fails with "no method... for
+# coercing 'RenameDims'"), and edgeR::cpm() calls min() internally which
+# BPCells' matrix class doesn't support either. So we skip edgeR::cpm()
+# entirely and compute log2 CPM by hand per gene (below), which only ever
+# needs one gene's row -- small enough to materialize directly.
+counts <- GetAssayData(ct_obj, assay = "RNA", layer = "counts")
+libsize <- Matrix::colSums(counts)
+```
+
+Plot distribution of expression.
+```{r}
+gene <- "SESN3"
+ct   <- "Neuroblast"
+
+de_col <- paste0("de.adj.pvalue.diploid.", ct)
+dd_col <- paste0("dd.lfsr.diploid.", ct)
+
+vals <- dd_results %>%
+  dplyr::filter(gene == !!gene) %>%
+  dplyr::select(
+    de = !!rlang::sym(de_col),
+    dd = !!rlang::sym(dd_col)
+  ) %>%
+  dplyr::slice(1)
+
+# log2 CPM for this one gene, matching edgeR::cpm(log=TRUE, prior.count=0)
+gene_counts <- as.numeric(as.matrix(counts[gene, ]))
+expr <- log2(gene_counts / libsize * 1e6)
+
+plot_df <- data.frame(
+  expr    = expr,
+  species = ct_obj$species
+)
+
+# rounding helpers
+round_down <- function(x, digits = 1) {
+  floor(x * 10^digits) / 10^digits
+}
+
+round_up <- function(x, digits = 2) {
+  ceiling(x * 10^digits) / 10^digits
+}
+
+de_label <- format(round_down(vals$de, 1), nsmall = 1)
+# round_up_signif() gives proper significant-figure precision (falling back
+# to scientific notation, e.g. "8 %*% 10^{-11}", for very small values)
+# instead of always rounding to 2 decimals, which floors tiny LFSRs to "0.01".
+# Parsing it into a language object (rather than inserting the string via
+# bquote's .()) lets the "%*%"/"^{}" plotmath syntax actually render as a
+# multiplication sign and superscript instead of literal text.
+dd_label <- parse(text = round_up_signif(vals$dd))[[1]]
+
+# plotmath label
+label_expr <- bquote(
+  atop(
+    bold("DE:") ~ "FDR >" ~ .(de_label),
+    bold("DD:") ~ "LFSR <" ~ .(dd_label)
+  )
+)
+
+dd_ex1_plot <- ggplot2::ggplot(
+  plot_df,
+  ggplot2::aes(x = expr, color = species, fill = species)
+) +
+  ggplot2::geom_density(alpha = 0.3, linewidth = 1) +
+  ggplot2::scale_color_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::labs(
+    x = "Expression (log2 CPM)",
+    y = "Density",
+    title = bquote(italic(.(gene)))
+  ) +
+  ggplot2::annotate(
+    "label",
+    x = Inf, y = Inf,
+    label = as.character(as.expression(label_expr)),
+    parse = TRUE,
+    hjust = 1.05,
+    vjust = 1.25,
+    size = 4,
+    label.size = 0.3,
+    label.padding = grid::unit(0.25, "lines"),
+    fill = "white",
+    color = "black"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    plot.title   = ggplot2::element_text(size = 14),
+    axis.title   = ggplot2::element_text(size = 14),
+    axis.text    = ggplot2::element_text(size = 12),
+    axis.line    = ggplot2::element_blank(),
+    legend.position = c(0.02, 0.98),
+    legend.justification = c("left", "top"),
+    legend.text  = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_blank()
+  ) +
+  ggplot2::guides(
+    color = ggplot2::guide_legend(title = NULL),
+    fill  = ggplot2::guide_legend(title = NULL)
+  )
+
+dd_ex1_plot
+#ggsave(paste0(results_path, 'main/dd_no_de_gene_example.pdf'), plot = dd_ex1_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### Mean expression and dispersion by species (a second DD-not-DE example)
+
+The density plot above shows one example (*SESN3* in Neuroblast) where the
+two species' distributions overlap in location (no DE) but differ in shape
+(DD). Here is a second, independent DD-not-DE example -- *SETD2* in
+Stromal cells -- shown directly in memento's own per-donor mean and
+dispersion estimates rather than as a density plot: these two box plots
+show each individual donor's mean expression and dispersion, grouped by
+species. As with the density plot above, the mean-expression boxes should
+overlap between species (no DE) while the dispersion boxes should not (DD).
+```{r}
+# Per-celltype memento output (mt/rb genes removed, mean-expression cutoff
+# and memento_min_cells_per_group already applied upstream), matching
+# dd_results above -- NOT the older all-celltypes-combined files under
+# data/memento/, which predate the mean cutoff and the low-cell-count donor
+# fix (see dispersion_diagnostics.Rmd / q_threshold_sensitivity.Rmd Section 8b).
+memento_q02_dir <- "/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/memento"
+
+ct <- 'Stromal.cells'
+gene <- "SETD2"
+ct_file <- gsub("\\.", "_", ct)
+
+diploid_mean_est <- read.csv(file.path(memento_q02_dir, paste0("diploid_memento_mean_", ct_file, ".csv")), check.names = FALSE)
+diploid_var_est  <- read.csv(file.path(memento_q02_dir, paste0("diploid_memento_var_",  ct_file, ".csv")), check.names = FALSE)
+```
+
+```{r}
+# Per-celltype files have one column per donor (celltype is implicit in the
+# filename): sg^<species>^<donor>
+donor_cols <- setdiff(colnames(diploid_mean_est), "gene")
+
+mean_vals <- as.numeric(diploid_mean_est[diploid_mean_est$gene == gene, donor_cols])
+disp_vals <- as.numeric(diploid_var_est[diploid_var_est$gene == gene, donor_cols])
+donor_species <- sub("^sg\\^([a-z]+)\\^.*$", "\\1", donor_cols)
+
+donor_plot_df <- data.frame(
+  species    = donor_species,
+  mean       = mean_vals,
+  dispersion = disp_vals
+)
+
+species_colors <- c("human" = "lightcoral", "chimp" = "turquoise3")
+species_labels <- c("human" = "human", "chimp" = "chimpanzee")
+
+p_mean_by_species <- ggplot2::ggplot(donor_plot_df, ggplot2::aes(x = species, y = mean, fill = species)) +
+  ggplot2::geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  ggplot2::geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
+  ggplot2::scale_fill_manual(values = species_colors, breaks = c("human", "chimp"), labels = species_labels) +
+  ggplot2::scale_x_discrete(limits = c("human", "chimp"), labels = species_labels) +
+  ggplot2::scale_y_continuous(breaks = seq(-8.5, -7.5, by = 0.5)) +
+  ggplot2::coord_cartesian(ylim = c(-8.5, -7.5)) +
+  ggplot2::labs(x = NULL, y = "Mean expression", title = bquote(italic(.(gene)))) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    legend.position = "none",
+    plot.title = ggplot2::element_text(size = 16),
+    axis.title = ggplot2::element_text(size = 18),
+    axis.text  = ggplot2::element_text(size = 15)
+  )
+p_dispersion_by_species <- ggplot2::ggplot(donor_plot_df, ggplot2::aes(x = species, y = dispersion, fill = species)) +
+  ggplot2::geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  ggplot2::geom_jitter(width = 0.15, size = 2, alpha = 0.7) +
+  ggplot2::scale_fill_manual(values = species_colors, breaks = c("human", "chimp"), labels = species_labels) +
+  ggplot2::scale_x_discrete(limits = c("human", "chimp"), labels = species_labels) +
+    ggplot2::coord_cartesian(ylim = c(-1.2, -0.6)) +
+  ggplot2::labs(x = NULL, y = "Dispersion") +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    legend.position = "none",
+    axis.title = ggplot2::element_text(size = 18),
+    axis.text  = ggplot2::element_text(size = 15)
+  )
+
+library(patchwork)
+p_boxplots <- p_mean_by_species + p_dispersion_by_species
+p_boxplots
+# ggplot2::ggsave(filename = paste0(results_path, "main/boxplots.pdf"), plot = p_boxplots,  device = "pdf", width = 9, height = 5, units = "in")
+```
+
+### DD and DE Opposite Signs
+
+Example gene illustrating a case where a gene is significant for *both* DD
+and DE, but the direction of the effect differs between the two: *MAML2*
+in ENS glia. Unlike the DD-not-DE examples above, the human and
+chimpanzee distributions for this gene differ in both location (DE) and
+shape (DD) -- but the species with the higher mean expression is not the
+species with the higher dispersion, i.e. the DD and DE effect sizes point
+in opposite directions. This is the kind of gene the "Effect Size Plot"
+section below (and its cis/trans effect-size comparisons) is built to
+characterize systematically across all cell types, rather than one example
+at a time.
+
+```{r}
+ct <- "ENS glia"
+# Subset to ENS glia cells only
+ct_obj <- subset(diploid_crossfilt_data, subset = celltype == ct)
+
+# Library size per cell (see note in the "DD but not DE" section above for
+# why we skip edgeR::cpm() and compute log2 CPM by hand per gene instead).
+counts <- GetAssayData(ct_obj, assay = "RNA", layer = "counts")
+libsize <- Matrix::colSums(counts)
+```
+
+Plot distribution of expression.
+```{r}
+gene <- "MAML2"
+ct   <- "ENS.glia"
+
+de_col <- paste0("de.adj.pvalue.diploid.", ct)
+dd_col <- paste0("dd.lfsr.diploid.", ct)
+
+vals <- dd_results %>%
+  dplyr::filter(gene == !!gene) %>%
+  dplyr::select(
+    de = !!rlang::sym(de_col),
+    dd = !!rlang::sym(dd_col)
+  ) %>%
+  dplyr::slice(1)
+
+# log2 CPM for this one gene, matching edgeR::cpm(log=TRUE, prior.count=0)
+gene_counts <- as.numeric(as.matrix(counts[gene, ]))
+expr <- log2(gene_counts / libsize * 1e6)
+
+plot_df <- data.frame(
+  expr    = expr,
+  species = ct_obj$species
+)
+
+de_label <- parse(text = round_up_signif(vals$de))[[1]]
+# round_up_signif() gives proper significant-figure precision (falling back
+# to scientific notation, e.g. "8 %*% 10^{-11}", for very small values)
+# instead of always rounding to 2 decimals, which floors tiny LFSRs to "0.01".
+# Parsing it into a language object (rather than inserting the string via
+# bquote's .()) lets the "%*%"/"^{}" plotmath syntax actually render as a
+# multiplication sign and superscript instead of literal text.
+dd_label <- parse(text = round_up_signif(vals$dd))[[1]]
+
+# plotmath label
+label_expr <- bquote(
+  atop(
+    bold("DE:") ~ "FDR <" ~ .(de_label),
+    bold("DD:") ~ "LFSR <" ~ .(dd_label)
+  )
+)
+
+dd_ex2_plot <- ggplot2::ggplot(
+  plot_df,
+  ggplot2::aes(x = expr, color = species, fill = species)
+) +
+  ggplot2::geom_density(alpha = 0.3, linewidth = 1) +
+  ggplot2::scale_color_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("human" = "lightcoral", "chimp" = "turquoise3"),
+    breaks = c("human", "chimp"),
+    labels = c("human" = "human", "chimp" = "chimpanzee")
+  ) +
+  ggplot2::labs(
+    x = "Expression (log2 CPM)",
+    y = "Density",
+    title = bquote(italic(.(gene)))
+  ) +
+  ggplot2::annotate(
+    "label",
+    x = Inf, y = Inf,
+    label = as.character(as.expression(label_expr)),
+    parse = TRUE,
+    hjust = 1.05,
+    vjust = 1.25,
+    size = 4,
+    label.size = 0.3,
+    label.padding = grid::unit(0.25, "lines"),
+    fill = "white",
+    color = "black"
+  ) +
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+    plot.title   = ggplot2::element_text(size = 14),
+    axis.title   = ggplot2::element_text(size = 14),
+    axis.text    = ggplot2::element_text(size = 12),
+    axis.line    = ggplot2::element_blank(),
+    legend.position = c(0.02, 0.98),
+    legend.justification = c("left", "top"),
+    legend.text  = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_blank()
+  ) +
+  ggplot2::guides(
+    color = ggplot2::guide_legend(title = NULL),
+    fill  = ggplot2::guide_legend(title = NULL)
+  )
+
+dd_ex2_plot
+ggsave(paste0(results_path, 'main/dd_de_gene_example.pdf'), plot = dd_ex2_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+## Effect Size Plot
+
+We plot DD effect sizes of human vs chimpanzee comparisons. This includes all cell types together. Light grey represents DD genes in the diploid (LFSR < 0.05) and black shows the subset recapitulated in the allotetraploid (LFSR < 0.05 and same sign of effect).
+```{r}
+plot_df <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_dip_col  <- paste0("dd.lfsr.diploid.", ct)
+  lfsr_allo_col <- paste0("dd.lfsr.allotetraploid.", ct)
+  same_col      <- paste0("dd.recapitulated.same.sign.", ct)
+  dip_col       <- paste0("dd.logFC.diploid.", ct)
+  allo_col      <- paste0("dd.logFC.allotetraploid.", ct)
+
+  dd_results %>%
+    dplyr::select(
+      gene,
+      dplyr::all_of(lfsr_dip_col),
+      dplyr::all_of(lfsr_allo_col),
+      dplyr::all_of(same_col),
+      dplyr::all_of(dip_col),
+      dplyr::all_of(allo_col)
+    ) %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      diploid_lfsr = as.numeric(.data[[lfsr_dip_col]]),
+      allotetraploid_lfsr = as.numeric(.data[[lfsr_allo_col]]),
+      same_sign = as.integer(.data[[same_col]]),
+      diploid_logFC = as.numeric(.data[[dip_col]]),
+      allotetraploid_logFC = as.numeric(.data[[allo_col]])
+    ) %>%
+    dplyr::mutate(
+      sig_dd = diploid_lfsr < 0.001,
+      black_point = diploid_lfsr < 0.001 &
+        allotetraploid_lfsr < 0.001 &
+        same_sign == 1
+    ) %>%
+    dplyr::filter(
+      sig_dd,
+      !is.na(diploid_logFC),
+      !is.na(allotetraploid_logFC)
+    ) %>%
+    dplyr::mutate(
+      same_sign = dplyr::if_else(is.na(same_sign), 0L, same_sign),
+      black_point = dplyr::if_else(is.na(black_point), FALSE, black_point)
+    )
+}) %>%
+  dplyr::distinct(
+    gene, celltype, same_sign, black_point,
+    diploid_logFC, allotetraploid_logFC
+  )
+
+quad_df <- plot_df %>%
+  dplyr::mutate(
+    quadrant = dplyr::case_when(
+      allotetraploid_logFC >= 0 & diploid_logFC >= 0 ~ "TR",
+      allotetraploid_logFC <  0 & diploid_logFC >= 0 ~ "TL",
+      allotetraploid_logFC <  0 & diploid_logFC <  0 ~ "BL",
+      TRUE                                           ~ "BR"
+    )
+  ) %>%
+  dplyr::count(quadrant, name = "n") %>%
+  dplyr::mutate(pct = 100 * n / sum(n))
+
+xlim <- c(-2.1, 2.1)
+ylim <- c(-2.0, 2.0)
+
+label_pos <- tibble::tibble(
+  quadrant = c("TL", "TR", "BL", "BR"),
+  x = c(xlim[1] + 0.12, xlim[2] - 0.12, xlim[1] + 0.12, xlim[2] - 0.12),
+  y = c(ylim[2] - 0.12, ylim[2] - 0.12, ylim[1] + 0.12, ylim[1] + 0.12),
+  hjust = c(0, 1, 0, 1),
+  vjust = c(1, 1, 0, 0)
+)
+
+quad_labels <- label_pos %>%
+  dplyr::left_join(quad_df, by = "quadrant") %>%
+  dplyr::mutate(
+    label = ifelse(is.na(pct), "0%", paste0(sprintf("%.1f", pct), "%"))
+  )
+
+lim <- range(
+  c(plot_df$allotetraploid_logFC, plot_df$diploid_logFC),
+  na.rm = TRUE
+)
+
+short_lim <- as.numeric(
+  stats::quantile(lim, probs = c(0.1, 0.75), na.rm = TRUE)
+)
+
+pad <- 0.15
+
+blue_start <- short_lim[1] + pad
+# Extend the upper end further toward the corner than the 75th percentile
+# of the data, but stop short of the "% in this quadrant" label
+# (positioned at ylim[2] - 0.12) so the arrowhead doesn't overlap it.
+blue_end   <- min(xlim[2], ylim[2]) - 0.4
+
+red_bottom <- ylim[1] + pad
+red_top    <- ylim[2] - pad
+
+p_effect_size <- ggplot2::ggplot(
+  plot_df,
+  ggplot2::aes(x = allotetraploid_logFC, y = diploid_logFC)
+) +
+
+  ggplot2::geom_point(
+    data = dplyr::filter(plot_df, !black_point),
+    color = "grey75",
+    alpha = 0.8,
+    size = 1
+  ) +
+
+  ggplot2::geom_point(
+    data = dplyr::filter(plot_df, black_point),
+    color = "black",
+    alpha = 0.7,
+    size = 1
+  ) +
+
+  ggplot2::geom_label(
+    data = quad_labels,
+    ggplot2::aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    hjust = quad_labels$hjust,
+    vjust = quad_labels$vjust,
+    size = 4,
+    label.size = 0.25,
+    fill = "white",
+    color = "black"
+  ) +
+
+  ggplot2::scale_x_continuous(
+    breaks = c(-2, -1, 0, 1, 2),
+    expand = ggplot2::expansion(mult = 0.02)
+  ) +
+  ggplot2::scale_y_continuous(
+    breaks = c(-2, -1, 0, 1, 2),
+    expand = ggplot2::expansion(mult = 0.02)
+  ) +
+
+  ggplot2::coord_equal(xlim = xlim, ylim = ylim, clip = "on") +
+
+  ggplot2::geom_segment(
+    ggplot2::aes(
+      x = 0,
+      xend = 0,
+      y = red_bottom,
+      yend = red_top
+    ),
+    inherit.aes = FALSE,
+    color = "red",
+    linewidth = 0.7,
+    arrow = grid::arrow(
+      length = grid::unit(0.18, "cm"),
+      ends = "both",
+      type = "closed"
+    )
+  ) +
+
+  ggplot2::geom_segment(
+    ggplot2::aes(
+      x = blue_start,
+      y = blue_start,
+      xend = blue_end,
+      yend = blue_end
+    ),
+    inherit.aes = FALSE,
+    color = "blue",
+    linewidth = 0.6,
+    arrow = grid::arrow(
+      length = grid::unit(0.18, "cm"),
+      ends = "both",
+      type = "closed"
+    )
+  ) +
+
+  ggplot2::labs(
+    x = "logFC human/chimpanzee in allotetraploid cells",
+    y = "logFC human/chimpanzee"
+  ) +
+
+  ggplot2::theme_classic() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor = ggplot2::element_line(color = "grey90", linewidth = 0.25),
+    panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = ggplot2::element_blank(),
+    axis.title = ggplot2::element_text(size = 10),
+    axis.text  = ggplot2::element_text(size = 8)
+  )
+
+p_effect_size
+ggsave(paste0(results_path, 'main/cis_trans_effect_sizes_0.001.pdf'), plot = p_effect_size, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+
+### Supplementary: Percent DD Genes that have Same Sign
+Want to see how many significant DD genes in both diploid and allotetraploid settings also have the same sign of effect.
+```{r}
+
+same_sign_df <- purrr::map_dfr(celltypes, function(ct) {
+
+  dip_lfsr_col  <- paste0("dd.lfsr.diploid.", ct)
+  allo_lfsr_col <- paste0("dd.lfsr.allotetraploid.", ct)
+
+  dip_logfc_col  <- paste0("dd.logFC.diploid.", ct)
+  allo_logfc_col <- paste0("dd.logFC.allotetraploid.", ct)
+
+  dd_results %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      dip_lfsr = .data[[dip_lfsr_col]],
+      allo_lfsr = .data[[allo_lfsr_col]],
+      dip_logFC = .data[[dip_logfc_col]],
+      allo_logFC = .data[[allo_logfc_col]]
+    ) %>%
+    dplyr::filter(
+      !is.na(dip_lfsr),
+      !is.na(allo_lfsr),
+      dip_lfsr < 0.05,
+      allo_lfsr < 0.05,
+      !is.na(dip_logFC),
+      !is.na(allo_logFC)
+    ) %>%
+    dplyr::summarise(
+      n_sig_both = dplyr::n(),
+      n_same_sign = sum(sign(dip_logFC) == sign(allo_logFC)),
+      percent_same_sign = 100 * n_same_sign / n_sig_both,
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(celltype = ct)
+})
+
+# replace "." with space for nicer labels
+same_sign_df <- same_sign_df %>%
+  dplyr::mutate(
+    celltype_label = stringr::str_replace_all(celltype, "\\.", " ")
+  )
+
+# order by descending percent
+same_sign_df <- same_sign_df %>%
+  dplyr::arrange(desc(percent_same_sign)) %>%
+  dplyr::mutate(
+    celltype_label = factor(celltype_label, levels = celltype_label)
+  )
+
+p_same_sign <- ggplot(same_sign_df, aes(x = celltype_label, y = percent_same_sign)) +
+  geom_col(fill = "steelblue", color = "black", linewidth = 0.3) +
+  geom_text(
+    aes(label = paste0(round(percent_same_sign, 1), "%\n(n=", n_sig_both, ")")),
+    vjust = -0.3,
+    size = 3
+  ) +
+  labs(
+    x = "",
+    y = "% same sign of effect size",
+    title = ""
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    axis.line = element_blank()
+  ) +
+  coord_cartesian(
+    ylim = c(0, max(same_sign_df$percent_same_sign, na.rm = TRUE) * 1.15)
+  )
+
+p_same_sign
+#ggsave(paste0(results_path, 'supplement/same_sign_effect_sizes.pdf'), plot = p_same_sign, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+## Cis vs Trans Analysis
+
+### Number of cis/trans DD genes
+
+Number of DD genes for each cell type.The overall category using mean cis proportion of cell types DD.
+```{r}
+# -----------------------------
+# Per-cell-type counts
+# -----------------------------
+celltype_counts <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.cis.category."),
+    names_to = "celltype",
+    values_to = "category"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\."),
+    celltype = stringr::str_replace_all(celltype, "\\.", " "),
+    category = factor(category, levels = c("cis", "neither", "trans", "mixed", "not DD"))
+  ) %>%
+  dplyr::count(celltype, category, .drop = FALSE) %>%
+  tidyr::pivot_wider(
+    names_from = category,
+    values_from = n,
+    values_fill = 0
+  )
+celltype_counts
+
+```
+
+
+
+### Effect size comparisons
+
+We compare the DD effect sizes in diploid cells for all cell types together. These meet our cutoff of > 0.7 as cis and < 0.3 is trans. We use a K-S test to test for significant differences in the effect sizes.
+```{r}
+# -------------------------------
+# 1. Cis category → long
+# -------------------------------
+cat_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.cis.category."),
+    names_to = "celltype",
+    values_to = "category"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\.")
+  )
+
+# -------------------------------
+# 2. Effect size → long
+# -------------------------------
+eff_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.logFC.diploid.")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("dd.logFC.diploid."),
+    names_to = "celltype",
+    values_to = "effect_size"
+  ) %>%
+  dplyr::mutate(
+    celltype = stringr::str_remove(celltype, "^dd\\.logFC\\.diploid\\.")
+  )
+
+# -------------------------------
+# 3. Combine (gene × cell type instances)
+# -------------------------------
+ecdf_df <- cat_long %>%
+  dplyr::inner_join(eff_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(celltype %in% celltypes) %>%
+  dplyr::filter(!is.na(category)) %>%
+  dplyr::mutate(
+    category = factor(category, levels = c("cis", "neither", "trans"))
+  )
+
+ecdf_df_plot <- ecdf_df %>%
+  dplyr::filter(category %in% c("cis", "trans")) %>%
+  dplyr::mutate(
+    category = factor(category, levels = c("cis", "trans"))
+  )
+
+
+# subset effect sizes
+cis_vals <- ecdf_df_plot %>%
+  dplyr::filter(category == "cis") %>%
+  dplyr::pull(abs(effect_size))
+
+trans_vals <- ecdf_df_plot %>%
+  dplyr::filter(category == "trans") %>%
+  dplyr::pull(abs(effect_size))
+
+# KS test
+ks_res <- ks.test(cis_vals, trans_vals)
+
+ks_res
+
+```
+
+```{r}
+# format p-value using your function
+p_label <- paste0("P < ", round_up_signif(ks_res$p.value))
+
+ecdf_plot <- ggplot2::ggplot(
+  ecdf_df_plot,
+  ggplot2::aes(x = abs(effect_size), color = category)
+) +
+  ggplot2::stat_ecdf(linewidth = 1) +
+
+  ggplot2::annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = p_label,
+    hjust = -0.2,
+    vjust = 2,
+    size = 4,
+    parse = TRUE   # needed for %*% and 10^{}
+  ) +
+
+  ggplot2::labs(
+    x = "Absolute logFC",
+    y = "Cumulative frequency",
+    color = ""
+  ) +
+  ggplot2::scale_color_manual(
+    values = c(
+      "cis"   = "#009E73",
+      "trans" = "#D55E00"
+    ),
+    labels = c(
+      cis   = expression(italic("cis")),
+      trans = expression(italic("trans"))
+    )
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, 1.19)) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", linewidth = 1),
+    panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = c(0.9, 0.05),
+    legend.justification = c("right", "bottom"),
+    legend.background = ggplot2::element_rect(
+      fill = scales::alpha("white", 0.7),
+      color = NA
+    ),
+    legend.key = ggplot2::element_blank(),
+    legend.key.height = grid::unit(0.9, "cm"),
+    legend.key.width  = grid::unit(1.2, "cm"),
+    legend.text  = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12)
+  )
+
+ecdf_plot
+#ggsave(paste0(results_path, 'main/ecdf_cis_trans.pdf'), plot = ecdf_plot, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+
+### Mean cis proportion of DD genes
+
+We compare the mean cis proportion of cell types that are DD to the number of times a gene is DD in a cell type. This includes all genes that are DD in the diploid.
+```{r}
+# ----------------------------------
+# Build long dataframe: one row per gene x cell type
+# ----------------------------------
+plot_df_long <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col <- paste0("dd.lfsr.diploid.", ct)
+  cis_col  <- paste0("dd.cis.proportion.", ct)
+
+  dd_results %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      dd_lfsr = .data[[lfsr_col]],
+      cis_prop = .data[[cis_col]]
+    )
+})
+
+# ----------------------------------
+# Keep only diploid-DD gene/celltype pairs
+# ----------------------------------
+plot_df_long_sig <- plot_df_long %>%
+  dplyr::filter(!is.na(dd_lfsr), dd_lfsr < 0.05, !is.na(cis_prop))
+
+# ----------------------------------
+# Collapse to gene-level summary
+# ----------------------------------
+plot_df <- plot_df_long_sig %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(
+    n_ct = dplyr::n(),
+    mean_cis_prop = mean(cis_prop, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    n_ct = factor(n_ct, levels = sort(unique(n_ct)))
+  )
+
+# ----------------------------------
+# Compute p-value: first vs last group
+# ----------------------------------
+n_ct_levels <- sort(unique(as.numeric(as.character(plot_df$n_ct))))
+first_group <- as.character(min(n_ct_levels))
+last_group  <- as.character(max(n_ct_levels))
+
+p_val <- wilcox.test(
+  mean_cis_prop ~ n_ct,
+  data = plot_df %>% dplyr::filter(n_ct %in% c(first_group, last_group))
+)$p.value
+
+p_label <- paste0("P < ", round_up_signif(p_val))
+
+# ----------------------------------
+# Bracket positioning
+# ----------------------------------
+y_max <- max(plot_df$mean_cis_prop, na.rm = TRUE)
+h     <- 0.03
+y_pos <- y_max + 0.055
+
+x_start <- which(levels(plot_df$n_ct) == first_group)
+x_end   <- which(levels(plot_df$n_ct) == last_group)
+x_mid   <- mean(c(x_start, x_end))
+
+# ----------------------------------
+# Plot
+# ----------------------------------
+p_mean_cis_diploid <- ggpubr::ggboxplot(
+  plot_df,
+  x = "n_ct",
+  y = "mean_cis_prop",
+  fill = "n_ct",
+  color = "black",
+  palette = "npg",
+  #add = "jitter",
+  add.params = list(width = 0.15, alpha = 0.5, size = 1)
+) +
+  scale_fill_viridis_d(option = "D", begin = 0.3, end = 1) +
+#   scale_fill_manual(
+#   values = colorRampPalette(c("#6BAED6", "#FB6A4A"))(length(unique(plot_df$n_ct)))
+# ) +
+  
+  scale_y_continuous(
+  breaks = seq(0, 1, by = 0.2),
+  expand = ggplot2::expansion(mult = 0.02)
+) +
+  annotate("segment", x = x_start, xend = x_end, y = y_pos, yend = y_pos) +
+  annotate("segment", x = x_start, xend = x_start, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = x_end, xend = x_end, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = x_mid, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+  labs(
+    x = "Number of cell types DD in diploid",
+    y = expression(paste("Mean ", italic("cis"), " proportion"))
+  ) +
+  ggpubr::theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.line = element_blank(),
+    plot.margin = margin(5.5, 20, 5.5, 5.5)
+  ) +
+  coord_cartesian(
+    ylim = c(0, y_pos + 0.05),
+    clip = "off"
+  )
+
+p_mean_cis_diploid
+# ggsave(paste0(results_path, 'main/mean_cis_by_n_celltype_dd.pdf'), plot = p_mean_cis_diploid, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+#### Robustness: effect size vs. number of DD cell types
+
+The plot above shows mean *cis* proportion increasing with the number of
+cell types a gene is DD in. A possible confound: if genes DD in more cell
+types also tend to have larger dispersion effect sizes, and effect size
+itself is related to *cis*/*trans* classification, that relationship could
+be driving the pattern above rather than the number of cell types per se.
+This plot checks whether absolute DD effect size (|logFC|) is in fact
+roughly stable across the same number-of-cell-types groups.
+
+```{r}
+plot_df_long <- purrr::map_dfr(celltypes, function(ct) {
+
+  lfsr_col  <- paste0("dd.lfsr.diploid.", ct)
+  logfc_col <- paste0("dd.logFC.diploid.", ct)
+
+  dd_results %>%
+    dplyr::transmute(
+      gene = gene,
+      celltype = ct,
+      dd_lfsr = .data[[lfsr_col]],
+      dd_logFC = .data[[logfc_col]]
+    )
+})
+
+plot_df <- plot_df_long %>%
+  dplyr::filter(
+    !is.na(dd_lfsr),
+    dd_lfsr < 0.05,
+    !is.na(dd_logFC)
+  ) %>%
+  dplyr::group_by(gene) %>%
+  dplyr::mutate(
+    n_ct = dplyr::n()
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    abs_effect_size = abs(dd_logFC),
+    n_ct = factor(n_ct, levels = sort(unique(n_ct)))
+  )
+
+# Wilcoxon test: first vs last group
+n_ct_levels <- sort(unique(as.numeric(as.character(plot_df$n_ct))))
+first_group <- as.character(min(n_ct_levels))
+last_group  <- as.character(max(n_ct_levels))
+
+p_val <- wilcox.test(
+  abs_effect_size ~ n_ct,
+  data = plot_df %>% dplyr::filter(n_ct %in% c(first_group, last_group))
+)$p.value
+
+p_label <- paste0("P < ", round_up_signif(p_val))
+
+# bracket positioning
+y_max <- max(plot_df$abs_effect_size, na.rm = TRUE)
+h     <- 0.03 * y_max
+y_pos <- y_max + 0.08 * y_max
+
+x_start <- which(levels(plot_df$n_ct) == first_group)
+x_end   <- which(levels(plot_df$n_ct) == last_group)
+x_mid   <- mean(c(x_start, x_end))
+
+p_abs_effect_size_diploid <- ggpubr::ggboxplot(
+  plot_df,
+  x = "n_ct",
+  y = "abs_effect_size",
+  fill = "n_ct",
+  color = "black",
+  # no jitter
+) +
+  scale_fill_viridis_d(option = "D", begin = 0.3, end = 1) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(n = 6),
+    expand = ggplot2::expansion(mult = 0.02)
+  ) +
+  annotate("segment", x = x_start, xend = x_end, y = y_pos, yend = y_pos) +
+  annotate("segment", x = x_start, xend = x_start, y = y_pos, yend = y_pos - h) +
+  annotate("segment", x = x_end, xend = x_end, y = y_pos, yend = y_pos - h) +
+  annotate("text", x = x_mid, y = y_pos + h, label = p_label, size = 4, parse = TRUE) +
+  labs(
+    x = "Number of cell types DD in diploid",
+    y = "abs(logFC)"
+  ) +
+  ggpubr::theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.line = element_blank(),
+    plot.margin = margin(5.5, 20, 5.5, 5.5)
+  ) +
+  coord_cartesian(
+    ylim = c(0, y_pos + 2 * h),
+    clip = "off"
+  )
+
+p_abs_effect_size_diploid
+# ggsave(paste0(results_path, 'supplement/robust_mean_cis_proportion/logFC_by_n_celltype_dd.pdf'), plot = p_abs_effect_size_diploid, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+### LOEUF
+
+Load LOF data.
+```{r}
+# Load data to get LOF scores
+path_lof <- '/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/evo_constraint/'
+lof_scores <- read.table(paste0(path_lof,'gnomad.v4.1.constraint_metrics.tsv'), header = TRUE)
+lof_scores <- lof_scores %>% filter(mane_select == "true")
+```
+
+We compare the loss of function in cis and trans genes. We use our overall definition of cis/trans genes by looking at mean cis proportion of cell type DD and determine cis (>0.7) or trans (<0.3).
+```{r}
+lof_cutoff <- function(dd_results, lof_scores, cis_cutoff, trans_cutoff) {
+
+  plot_df2 <- dd_results %>%
+    dplyr::select(gene, dd.in.diploid.mean.cis.proportion) %>%
+    dplyr::mutate(
+      combined_category = dplyr::case_when(
+        is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+        dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
+        TRUE                                             ~ "neither"
+      )
+    ) %>%
+    dplyr::inner_join(
+      lof_scores %>%
+        dplyr::select(gene, lof.oe),
+      by = "gene"
+    ) %>%
+    dplyr::filter(combined_category != "not DD") %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans")
+      )
+    )
+
+  # Wilcoxon: cis vs trans
+  pval <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::summarise(p = wilcox.test(lof.oe ~ cat)$p.value) %>%
+    dplyr::pull(p)
+
+  p_label <- paste0(
+    "P < ",
+    round_up_signif(pval)
+  )
+
+  y_pos <- min(1.6, max(plot_df2$lof.oe, na.rm = TRUE) * 1.01)
+  h <- 0.05
+  # uniform clearance above the bracket for every label (plain-decimal and
+  # scientific-notation alike), so labels line up consistently across plots.
+  label_gap <- 0.16
+  label_size <- 6
+
+  p_lof <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = lof.oe, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+
+    # bracket spanning cis (1) to trans (3)
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "trans"   = "#D55E00",
+      "neither" = "#0072B2"
+    )) +
+    ggplot2::labs(x = "", y = "LOEUF") +
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 18),
+      axis.text = ggplot2::element_text(size = 16)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(0, 1.8)) +
+    ggplot2::scale_x_discrete(labels = c(
+      "cis"     = expression(italic("cis")),
+      "trans"   = expression(italic("trans")),
+      "neither" = "neither"
+    ))
+
+  # add p-value label conditionally
+  if (pval >= 1e-4) {
+    p_lof <- p_lof +
+      ggplot2::annotate(
+        "text",
+        x = 2,
+        y = y_pos + label_gap,
+        label = p_label,
+        size = label_size
+      )
+  } else {
+    p_lof <- p_lof +
+      ggplot2::annotate(
+        "text",
+        x = 2,
+        y = y_pos + label_gap,
+        label = p_label,
+        size = label_size,
+        parse = TRUE
+      )
+  }
+
+  return(p_lof)
+}
+
+p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,0.7,0.3)
+p_0.7_0.3lof
+
+#ggsave(paste0(results_path, 'main/lof_cis_trans.pdf'), plot = p_0.7_0.3lof, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+#### Supplementary varying cis/trans cutoff
+
+Robustness check: does the LOEUF (loss-of-function intolerance) difference
+between *cis* and *trans* DD genes shown above hold up across a range of
+*cis*/*trans* cutoff choices, not just the 0.7/0.3 split used as the main
+cutoff? Six panels below sweep the cutoff pair from the most permissive
+(0.6/0.4) to the strictest (0.85/0.15).
+```{r fig.width=13, fig.height=8}
+p_0.6_0.4lof <-lof_cutoff(dd_results,lof_scores,0.6,0.4)
+p_0.65_0.35lof <-lof_cutoff(dd_results,lof_scores,0.65,0.35)
+p_0.7_0.3lof <-lof_cutoff(dd_results,lof_scores,0.7,0.3)
+p_0.75_0.25lof <-lof_cutoff(dd_results,lof_scores,0.75,0.25)
+p_0.8_0.2lof <-lof_cutoff(dd_results,lof_scores,0.8,0.2)
+p_0.85_0.15lof <-lof_cutoff(dd_results,lof_scores,0.85,0.15)
+
+(p_0.6_0.4lof + p_0.65_0.35lof + p_0.7_0.3lof + p_0.75_0.25lof + p_0.8_0.2lof + p_0.85_0.15lof) +
+  patchwork::plot_layout(ncol = 3)
+```
+
+
+### Percent coding identity
+
+We load percent coding identity. We take more conservative estimate of coding divergence by taking the minimum difference between human to chimp and chimp to human.
+```{r}
+mart <- read.delim(
+  gzfile("/project2/gilad/kenneth/Analysis/mart_export.txt.gz"),
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+mart <- mart %>%
+  dplyr::mutate(
+    percent_identity = pmin(
+      #as.numeric(X.id..query.gene.identical.to.target.Chimpanzee.gene),
+      as.numeric(X.id..target.Chimpanzee.gene.identical.to.query.gene),
+      na.rm = TRUE
+    )
+  )
+
+mart <- mart %>% filter(Chimpanzee.orthology.confidence..0.low..1.high. ==1)
+```
+
+We compare the percent coding identity in cis and trans genes. We use our overall definition of cis/trans genes by looking at mean cis proportion of cell type DD and determine cis (>0.7) or trans (<0.3).
+```{r}
+pci_cutoff <- function(dd_results, mart, cis_cutoff, trans_cutoff) {
+
+  plot_df <- dd_results %>%
+    dplyr::select(gene, dd.in.diploid.mean.cis.proportion) %>%
+    dplyr::mutate(
+      combined_category = dplyr::case_when(
+        is.na(dd.in.diploid.mean.cis.proportion) ~ "not DD",
+        dd.in.diploid.mean.cis.proportion > cis_cutoff   ~ "cis",
+        dd.in.diploid.mean.cis.proportion < trans_cutoff ~ "trans",
+        TRUE                                             ~ "neither"
+      )
+    ) %>%
+    dplyr::left_join(
+      mart %>%
+        dplyr::select(Gene.name, percent_identity) %>%
+        dplyr::rename(gene = Gene.name) %>%
+        dplyr::mutate(percent_identity = as.numeric(percent_identity)),
+      by = "gene"
+    )
+
+  plot_df2 <- plot_df %>%
+    dplyr::filter(combined_category != "not DD") %>%
+    dplyr::mutate(
+      cat = factor(
+        combined_category,
+        levels = c("cis", "neither", "trans")
+      )
+    ) %>%
+    dplyr::filter(!is.na(percent_identity), is.finite(percent_identity))
+
+  # cis vs trans only
+  cis_trans <- plot_df2 %>%
+    dplyr::filter(cat %in% c("cis", "trans")) %>%
+    dplyr::mutate(cat = droplevels(cat))
+
+  pval <- wilcox.test(percent_identity ~ cat, data = cis_trans)$p.value
+  p_label <- paste0("P < ", round_up_signif(pval))
+
+  ymin <- 96
+  # Lowered from 102 -- percent identity can't exceed 100, so a box/axis
+  # extending to 102 looked wrong. 101.8 still clears the label (checked
+  # below) without showing a nonsensical >100 tick.
+  ymax <- 101.8
+
+  y_pos <- 100.75
+  h <- (ymax - ymin) * 0.03
+  # uniform clearance above the bracket for every label (plain-decimal and
+  # scientific-notation alike), so labels line up consistently across plots.
+  # (previously ymax=100.8 was actually *below* y_pos+h, clipping this label)
+  label_gap <- h * 3
+
+  p <- ggplot2::ggplot(plot_df2, ggplot2::aes(x = cat, y = percent_identity, fill = cat)) +
+    ggplot2::geom_boxplot(color = "black", alpha = 0.7, outlier.shape = NA) +
+    ggplot2::annotate("segment", x = 1, xend = 3, y = y_pos, yend = y_pos) +
+    ggplot2::annotate("segment", x = 1, xend = 1, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("segment", x = 3, xend = 3, y = y_pos, yend = y_pos - h) +
+    ggplot2::annotate("text", x = 2, y = y_pos + label_gap, label = p_label, size = 6, parse = TRUE) +
+    ggplot2::scale_fill_manual(values = c(
+      "cis"     = "#009E73",
+      "neither" = "#0072B2",
+      "trans"   = "#D55E00"
+    )) +
+    ggplot2::labs(x = "", y = "Percent coding identity") +
+    ggpubr::theme_pubr() +
+    ggplot2::theme(
+      axis.line = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", linewidth = 1, fill = NA),
+      panel.grid.major.y = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+      panel.grid.minor.y = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor.x = ggplot2::element_blank(),
+      legend.position = "none",
+      axis.title = ggplot2::element_text(size = 18),
+      axis.text  = ggplot2::element_text(size = 16)
+    ) +
+    ggplot2::coord_cartesian(ylim = c(ymin, ymax)) +
+    ggplot2::scale_y_continuous(breaks = c(96, 98, 100)) +
+    ggplot2::scale_x_discrete(labels = c(
+      cis     = expression(italic("cis")),
+      neither = "neither",
+      trans   = expression(italic("trans"))
+    ))
+
+  return(p)
+}
+
+p_0.7_0.3_pci  <- pci_cutoff(dd_results, mart, 0.7, 0.3)
+p_0.7_0.3_pci
+# ggsave(paste0(results_path, 'main/pci_cis_trans.pdf'), plot = p_0.7_0.3_pci, device = "pdf", width = 7, height = 5, units = "in")
+```
+
+#### Supplementary varying cis/trans
+
+Same robustness check as above, for percent coding identity instead of
+LOEUF: does the *cis* vs. *trans* difference hold across the same sweep of
+cutoff choices (0.6/0.4 through 0.85/0.15)?
+```{r fig.width=13, fig.height=8}
+p_0.6_0.4_pci  <- pci_cutoff(dd_results, mart, 0.6, 0.4)
+p_0.65_0.35_pci <- pci_cutoff(dd_results, mart, 0.65, 0.35)
+p_0.7_0.3_pci  <- pci_cutoff(dd_results, mart, 0.7, 0.3)
+p_0.75_0.25_pci <- pci_cutoff(dd_results, mart, 0.75, 0.25)
+p_0.8_0.2_pci  <- pci_cutoff(dd_results, mart, 0.8, 0.2)
+p_0.85_0.15_pci <- pci_cutoff(dd_results, mart, 0.85, 0.15)
+
+(p_0.6_0.4_pci + p_0.65_0.35_pci + p_0.7_0.3_pci + p_0.75_0.25_pci + p_0.8_0.2_pci + p_0.85_0.15_pci) +
+  patchwork::plot_layout(ncol = 3)
+```
+
+
+### Supplementary: Determining cis/trans cutoffs
+
+All 20 cell types.
+
+#### Number of DD Genes
+
+Using cis cutoffs.
+```{r fig.width=10, fig.height=6.5}
+celltypes_demo <- celltypes  # all 20 cell types
+cutoffs   <- seq(0.5, 1, by = 0.1)
+
+# ----------------------------------------------
+# 1. Wide -> long for cis proportion
+#    dd.cis.proportion.<celltype>
+# ----------------------------------------------
+cis_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.proportion.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.cis.proportion."),
+    names_to  = "celltype",
+    values_to = "cis_prop"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.cis\\.proportion\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 2. Wide -> long for diploid DD significance
+#    dd.lfsr.diploid.<celltype>
+# ----------------------------------------------
+lfsr_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.lfsr.diploid.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.lfsr.diploid."),
+    names_to  = "celltype",
+    values_to = "dd_lfsr_diploid"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.lfsr\\.diploid\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 3. Merge and filter to diploid DD genes only
+#    condition: dd.lfsr.diploid < 0.05
+# ----------------------------------------------
+df_dd <- cis_long %>%
+  dplyr::inner_join(lfsr_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(
+    celltype %in% celltypes_demo,
+    !is.na(dd_lfsr_diploid),
+    dd_lfsr_diploid < 0.05
+  )
+
+# ----------------------------------------------
+# 4. Count cis genes passing each cutoff by cell type
+#    condition: cis_prop >= cutoff
+# ----------------------------------------------
+summary_plot_dd <- tidyr::expand_grid(
+  celltype = celltypes_demo,
+  cutoff   = cutoffs
+) %>%
+  dplyr::left_join(df_dd, by = "celltype") %>%
+  dplyr::group_by(celltype, cutoff) %>%
+  dplyr::summarise(
+    n_cis_genes = sum(cis_prop >= cutoff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------------------
+# 4b. Also compute the trans-cutoff counts here (recomputed identically in
+#     the trans chunk below) purely so the cis and trans "number of DD
+#     genes" plots can share a common y-axis range -- see shared_max_dd_genes.
+# ----------------------------------------------
+cutoffs_trans_preview <- seq(0, 0.5, by = 0.1)
+summary_plot_trans_preview <- tidyr::expand_grid(
+  celltype = celltypes_demo,
+  cutoff   = cutoffs_trans_preview
+) %>%
+  dplyr::left_join(df_dd, by = "celltype") %>%
+  dplyr::group_by(celltype, cutoff) %>%
+  dplyr::summarise(
+    n_trans_genes = sum(cis_prop <= cutoff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+shared_max_dd_genes <- max(summary_plot_dd$n_cis_genes, summary_plot_trans_preview$n_trans_genes, na.rm = TRUE)
+
+# ----------------------------------------------
+# 5. Plot -- shared y-axis range with the trans-cutoff plot below (was
+#    independently scaled to each plot's own data, which made the two hard
+#    to compare directly)
+# ----------------------------------------------
+p_cis_cutoff_genes <- ggplot2::ggplot(
+  summary_plot_dd,
+  ggplot2::aes(x = cutoff, y = n_cis_genes, color = celltype)
+) +
+  ggplot2::geom_line(linewidth = 1.2) +
+  ggplot2::geom_point(size = 2.5) +
+  ggplot2::coord_cartesian(ylim = c(0, shared_max_dd_genes * 1.05)) +
+  ggplot2::scale_y_continuous(breaks = scales::pretty_breaks(n = 6)) +
+  ggplot2::scale_x_continuous(breaks = cutoffs, limits = c(0.5, 1)) +
+  ggplot2::scale_color_discrete(labels = function(x) gsub("\\.", " ", x)) +
+  ggplot2::labs(
+    x = expression(italic("cis") ~ "proportion"),
+    y = expression("#" ~ italic("cis") ~ "DD genes"),
+    color = "Cell Type"
+  ) +
+  ggplot2::theme_minimal(base_size = 13) +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill  = NA,
+      linewidth = 1
+    ),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 11),
+    legend.text = ggplot2::element_text(size = 9),
+    legend.key.size = grid::unit(0.4, "cm")
+  )
+
+p_cis_cutoff_genes
+# ggsave(paste0(results_path, 'supplement/cis_trans_cutoffs/cis_cutoff_num_dd_genes.pdf'), plot = p_cis_cutoff_genes, device = "pdf", width = 10, height = 6.5, units = "in")
+```
+
+Using trans cutoffs.
+```{r fig.width=10, fig.height=6.5}
+cutoffs_trans <- seq(0, 0.5, by = 0.1)
+
+# ----------------------------------------------
+# 1. Wide -> long for cis proportion
+#    dd.cis.proportion.<celltype>
+# ----------------------------------------------
+cis_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.cis.proportion.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.cis.proportion."),
+    names_to  = "celltype",
+    values_to = "cis_prop"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.cis\\.proportion\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 2. Wide -> long for diploid DD significance
+#    dd.lfsr.diploid.<celltype>
+# ----------------------------------------------
+lfsr_long <- dd_results %>%
+  dplyr::select(gene, starts_with("dd.lfsr.diploid.")) %>%
+  tidyr::pivot_longer(
+    cols      = starts_with("dd.lfsr.diploid."),
+    names_to  = "celltype",
+    values_to = "dd_lfsr_diploid"
+  ) %>%
+  dplyr::mutate(
+    celltype = sub("^dd\\.lfsr\\.diploid\\.", "", celltype)
+  )
+
+# ----------------------------------------------
+# 3. Merge and filter to diploid DD genes only
+#    condition: dd.lfsr.diploid < 0.05
+# ----------------------------------------------
+df_dd <- cis_long %>%
+  dplyr::inner_join(lfsr_long, by = c("gene", "celltype")) %>%
+  dplyr::filter(
+    celltype %in% celltypes_demo,
+    !is.na(dd_lfsr_diploid),
+    dd_lfsr_diploid < 0.05
+  )
+
+# ----------------------------------------------
+# 4. Count trans genes at each cutoff by cell type
+#    Define trans as: cis_prop <= cutoff
+# ----------------------------------------------
+summary_plot_trans <- tidyr::expand_grid(
+  celltype = celltypes_demo,
+  cutoff   = cutoffs_trans
+) %>%
+  dplyr::left_join(df_dd, by = "celltype") %>%
+  dplyr::group_by(celltype, cutoff) %>%
+  dplyr::summarise(
+    n_trans_genes = sum(cis_prop <= cutoff, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ----------------------------------------------
+# 5. Plot -- shared y-axis range with the cis-cutoff plot above
+#    (shared_max_dd_genes computed in that chunk)
+# ----------------------------------------------
+p_trans_cutoff_genes <- ggplot2::ggplot(
+  summary_plot_trans,
+  ggplot2::aes(x = cutoff, y = n_trans_genes, color = celltype)
+) +
+  ggplot2::geom_line(linewidth = 1.2) +
+  ggplot2::geom_point(size = 2.5) +
+  ggplot2::coord_cartesian(ylim = c(0, shared_max_dd_genes * 1.05)) +
+  ggplot2::scale_y_continuous(breaks = scales::pretty_breaks(n = 6)) +
+  ggplot2::scale_x_continuous(breaks = cutoffs_trans, limits = c(0, 0.5)) +
+  ggplot2::scale_color_discrete(
+    labels = function(x) gsub("\\.", " ", x)
+  ) +
+  ggplot2::labs(
+    x = expression(italic("cis") ~ "proportion"),
+    y = expression("#" ~ italic("trans") ~ "DD genes"),
+    title = "",
+    color = "Cell Type"
+  ) +
+  ggplot2::theme_minimal(base_size = 13) +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill  = NA,
+      linewidth = 1
+    ),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 11),
+    legend.text = ggplot2::element_text(size = 9),
+    legend.key.size = grid::unit(0.4, "cm")
+  )
+
+p_trans_cutoff_genes
+# ggsave(paste0(results_path, 'supplement/cis_trans_cutoffs/trans_cutoff_num_dd_genes.pdf'), plot = p_trans_cutoff_genes, device = "pdf", width = 10, height = 6.5, units = "in")
+```
+
+#### DD genes that exist in multiple cell types
+
+With all 20 cell types, showing one bar per exact count (1, 2, 3, ..., 20)
+is too sparse -- most of the high counts have very few (or zero) genes.
+Instead, `n_celltypes_{cis,trans}` is bucketed into 1, 2, ..., 9, 10+
+and gene counts summed within each bucket.
+
+```{r}
+# Buckets n (1..max_n) into 1, 2, ..., 9, 10+ (the last bucket spans
+# 10..max_n but is always labeled "10+").
+bucket_n_celltypes <- function(n, max_n) {
+  breaks <- unique(pmin(c(0:9, max_n), max_n))
+  labs   <- c(as.character(1:9), "10+")[seq_len(length(breaks) - 1)]
+  cut(n, breaks = breaks, labels = labs, include.lowest = TRUE)
+}
+```
+
+Using cis cutoffs.
+```{r fig.width=10, fig.height=6.5}
+N_ct <- length(celltypes_demo)
+bucket_levels <- levels(bucket_n_celltypes(1:N_ct, N_ct))
+
+# For each cutoff, count how many cell types each gene is cis-like in
+# (defined as dd.cis.proportion >= cutoff among diploid DD genes)
+gene_ct_counts_cis_dd <- df_dd %>%
+  dplyr::filter(celltype %in% celltypes_demo) %>%
+  tidyr::expand_grid(cutoff = cutoffs) %>%
+  dplyr::filter(cis_prop >= cutoff) %>%
+  dplyr::distinct(gene, celltype, cutoff) %>%
+  dplyr::count(cutoff, gene, name = "n_celltypes_cis")
+
+# Bucketed histogram: sum of genes within each bucket of cell-type counts
+plot_df_cis_dd <- gene_ct_counts_cis_dd %>%
+  dplyr::filter(n_celltypes_cis >= 1) %>%
+  dplyr::mutate(bucket = bucket_n_celltypes(n_celltypes_cis, N_ct)) %>%
+  dplyr::count(cutoff, bucket, name = "n_genes", .drop = FALSE) %>%
+  tidyr::complete(
+    cutoff,
+    bucket = factor(bucket_levels, levels = bucket_levels),
+    fill = list(n_genes = 0)
+  ) %>%
+  dplyr::mutate(
+    cutoff = factor(cutoff, levels = sort(unique(cutoffs)))
+  )
+
+# Also compute the trans-cutoff bucketed counts here (recomputed identically
+# in the trans chunk below) purely so the cis and trans "# DD genes in N cell
+# types" plots can share a common y-axis range.
+plot_df_trans_dd_preview <- gene_ct_counts_trans_dd_preview <- df_dd %>%
+  dplyr::filter(celltype %in% celltypes_demo) %>%
+  tidyr::expand_grid(cutoff = cutoffs_trans) %>%
+  dplyr::filter(cis_prop <= cutoff) %>%
+  dplyr::distinct(gene, celltype, cutoff) %>%
+  dplyr::count(cutoff, gene, name = "n_celltypes_trans") %>%
+  dplyr::filter(n_celltypes_trans >= 1) %>%
+  dplyr::mutate(bucket = bucket_n_celltypes(n_celltypes_trans, N_ct)) %>%
+  dplyr::count(cutoff, bucket, name = "n_genes", .drop = FALSE)
+
+shared_max_dd_genes_per_ct <- max(plot_df_cis_dd$n_genes, plot_df_trans_dd_preview$n_genes, na.rm = TRUE)
+
+# Plot
+p_cis_dd_celltypes <- ggplot2::ggplot(
+  plot_df_cis_dd,
+  ggplot2::aes(x = bucket, y = n_genes)
+) +
+  ggplot2::geom_col(fill = "#619CFF") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n_genes),
+    vjust = -0.3,
+    size = 3
+  ) +
+  ggplot2::facet_wrap(~ cutoff, ncol = 3) +
+  ggplot2::coord_cartesian(ylim = c(0, shared_max_dd_genes_per_ct * 1.15)) +
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.15))
+  ) +
+  ggplot2::labs(
+    x = expression("# cell types where" ~ italic("cis") ~ "DD genes exist"),
+    y = "# DD genes",
+    title = ""
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    axis.line = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
+    strip.background = ggplot2::element_rect(
+      fill = "grey88",
+      color = "black",
+      linewidth = 0.5
+    ),
+    strip.text = ggplot2::element_text(face = "bold"),
+    axis.ticks = ggplot2::element_line(color = "black", linewidth = 0.3)
+  )
+
+p_cis_dd_celltypes
+# ggsave(paste0(results_path, 'supplement/cis_trans_cutoffs/cis_cutoff_num_dd_genes_per_celltype.pdf'), plot = p_cis_dd_celltypes, device = "pdf", width = 10, height = 6.5, units = "in")
+```
+
+Using trans cutoffs.
+```{r fig.width=10, fig.height=6.5}
+# For each cutoff, count how many cell types each gene is trans-like in
+# (defined as dd.cis.proportion <= cutoff among diploid DD genes)
+gene_ct_counts_trans_dd <- df_dd %>%
+  dplyr::filter(celltype %in% celltypes_demo) %>%
+  tidyr::expand_grid(cutoff = cutoffs_trans) %>%
+  dplyr::filter(cis_prop <= cutoff) %>%
+  dplyr::distinct(gene, celltype, cutoff) %>%
+  dplyr::count(cutoff, gene, name = "n_celltypes_trans")
+
+# Bucketed histogram: sum of genes within each bucket of cell-type counts
+plot_df_trans_dd <- gene_ct_counts_trans_dd %>%
+  dplyr::filter(n_celltypes_trans >= 1) %>%
+  dplyr::mutate(bucket = bucket_n_celltypes(n_celltypes_trans, N_ct)) %>%
+  dplyr::count(cutoff, bucket, name = "n_genes", .drop = FALSE) %>%
+  tidyr::complete(
+    cutoff,
+    bucket = factor(bucket_levels, levels = bucket_levels),
+    fill = list(n_genes = 0)
+  ) %>%
+  dplyr::mutate(
+    cutoff = factor(cutoff, levels = sort(unique(cutoffs_trans)))
+  )
+
+# Plot
+p_trans_cutoff_celltype <- ggplot2::ggplot(
+  plot_df_trans_dd,
+  ggplot2::aes(x = bucket, y = n_genes)
+) +
+  ggplot2::geom_col(fill = "#619CFF") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n_genes),
+    vjust = -0.3,
+    size = 3
+  ) +
+  ggplot2::facet_wrap(~ cutoff, ncol = 3) +
+  ggplot2::coord_cartesian(ylim = c(0, shared_max_dd_genes_per_ct * 1.15)) +
+  ggplot2::scale_y_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.15))
+  ) +
+  ggplot2::labs(
+    x = expression("# cell types where" ~ italic("trans") ~ "DD genes exist"),
+    y = "# DD genes",
+    title = ""
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_rect(
+      color = "black",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    axis.line = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
+    strip.background = ggplot2::element_rect(
+      fill = "grey88",
+      color = "black",
+      linewidth = 0.5
+    ),
+    strip.text = ggplot2::element_text(face = "bold"),
+    axis.ticks = ggplot2::element_line(color = "black", linewidth = 0.3)
+  )
+
+p_trans_cutoff_celltype
+# ggsave(paste0(results_path, 'supplement/cis_trans_cutoffs/trans_cutoff_num_dd_genes_per_celltype.pdf'), plot = p_trans_cutoff_celltype, device = "pdf", width = 10, height = 6.5, units = "in")
+```
+
+### Supplementary: Cis/Trans Replication at a Stricter Mean Expression Cutoff (-7)
+
+Everywhere above uses `dd_results`, which was already built with memento's
+`mean_expr_cutoff = -6` (per gene x cell type, matching the convention in
+`de_dd_snakemake/scripts/memento_diploid.py`: a gene is retained for a cell
+type only if *all* its `(species, donor_id)` group mean estimates are
+`<= -6`). This section checks whether the cis/trans results replicate under
+a **stricter -7 cutoff** -- i.e. removing genes that passed -6 but wouldn't
+pass -7 -- using the same cis (> 0.7) / trans (< 0.3) mean cis-proportion
+definition as the main analysis throughout this document.
+
+```{r}
+# Per-donor mean estimates, per cell type -- the same per-celltype memento
+# output files dd_results was built from (mt/rb genes removed,
+# memento_min_cells_per_group already applied), NOT the older
+# all-celltypes-combined file under data/memento/, which predates both fixes
+# (it still includes MT genes and low-cell-count donors like C3651 that the
+# production pipeline excludes -- see q_threshold_sensitivity.Rmd Section 8b).
+#
+# For each cell type, find genes failing the stricter -7 cutoff -- mirroring
+# memento_diploid.py's own retained_genes = mean.index[(mean <= cutoff).all
+# (axis=1)]: a gene fails if *any* of its (species, donor_id) group means for
+# that cell type is missing or > -7.
+fail_minus7_by_ct <- purrr::map(celltypes, function(ct) {
+  ct_file <- gsub("\\.", "_", ct)
+  mean_f  <- file.path(memento_q02_dir, paste0("diploid_memento_mean_", ct_file, ".csv"))
+  if (!file.exists(mean_f)) return(character(0))
+  mean_df <- read.csv(mean_f, check.names = FALSE)
+  cols    <- setdiff(colnames(mean_df), "gene")
+  sub_mat <- as.matrix(mean_df[, cols])
+  pass    <- apply(sub_mat, 1, function(x) all(!is.na(x)) && all(x <= -7))
+  mean_df$gene[!pass]
+})
+names(fail_minus7_by_ct) <- celltypes
+```
+
+```{r}
+# Working copy of dd_results with the -7-failing genes NA'd out, per cell
+# type -- same effect as if -7 had been the pipeline's cutoff from the start,
+# without re-running memento.
+dd_results_m7 <- dd_results
+for (ct in celltypes) {
+  fail_genes <- fail_minus7_by_ct[[ct]]
+  idx <- dd_results_m7$gene %in% fail_genes
+  dd_results_m7[idx, paste0("dd.lfsr.diploid.", ct)]     <- NA
+  dd_results_m7[idx, paste0("dd.cis.proportion.", ct)]   <- NA
+  dd_results_m7[idx, paste0("dd.cis.category.", ct)]     <- NA
+}
+
+# Recompute the overall per-gene mean cis proportion (used by the LOEUF/PCI
+# panels below) on the -7-masked data, using the same aggregation as the
+# "Mean cis proportion of DD genes" section above: average dd.cis.proportion
+# across cell types where the gene is diploid-DD (lfsr < 0.05).
+plot_df_long_m7 <- purrr::map_dfr(celltypes, function(ct) {
+  lfsr_col <- paste0("dd.lfsr.diploid.", ct)
+  cis_col  <- paste0("dd.cis.proportion.", ct)
+  dd_results_m7 %>%
+    dplyr::transmute(gene = gene, celltype = ct,
+                      dd_lfsr = .data[[lfsr_col]], cis_prop = .data[[cis_col]])
+})
+plot_df_long_sig_m7 <- plot_df_long_m7 %>%
+  dplyr::filter(!is.na(dd_lfsr), dd_lfsr < 0.05, !is.na(cis_prop))
+
+mean_cis_m7 <- plot_df_long_sig_m7 %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(dd.in.diploid.mean.cis.proportion.m7 = mean(cis_prop, na.rm = TRUE), .groups = "drop")
+
+dd_results_m7 <- dd_results_m7 %>%
+  dplyr::select(-dd.in.diploid.mean.cis.proportion) %>%
+  dplyr::left_join(mean_cis_m7, by = "gene") %>%
+  dplyr::rename(dd.in.diploid.mean.cis.proportion = dd.in.diploid.mean.cis.proportion.m7)
+
+cat("Genes with non-NA overall mean cis proportion -- original (-6):",
+    sum(!is.na(dd_results$dd.in.diploid.mean.cis.proportion)),
+    " | at -7:", sum(!is.na(dd_results_m7$dd.in.diploid.mean.cis.proportion)), "\n")
+```
+
+**Upper left panel -- cis vs trans ECDF** (same construction as the "Effect
+size comparisons" section above, on `dd_results_m7`).
+```{r}
+cat_long_m7 <- dd_results_m7 %>%
+  dplyr::select(gene, starts_with("dd.cis.category.")) %>%
+  tidyr::pivot_longer(cols = starts_with("dd.cis.category."), names_to = "celltype", values_to = "category") %>%
+  dplyr::mutate(celltype = stringr::str_remove(celltype, "^dd\\.cis\\.category\\."))
+
+eff_long_m7 <- dd_results_m7 %>%
+  dplyr::select(gene, starts_with("dd.logFC.diploid.")) %>%
+  tidyr::pivot_longer(cols = starts_with("dd.logFC.diploid."), names_to = "celltype", values_to = "effect_size") %>%
+  dplyr::mutate(celltype = stringr::str_remove(celltype, "^dd\\.logFC\\.diploid\\."))
+
+ecdf_df_m7 <- cat_long_m7 %>%
+  dplyr::inner_join(eff_long_m7, by = c("gene", "celltype")) %>%
+  dplyr::filter(celltype %in% celltypes) %>%
+  dplyr::filter(!is.na(category)) %>%
+  dplyr::mutate(category = factor(category, levels = c("cis", "neither", "trans")))
+
+ecdf_df_plot_m7 <- ecdf_df_m7 %>%
+  dplyr::filter(category %in% c("cis", "trans")) %>%
+  dplyr::mutate(category = factor(category, levels = c("cis", "trans")))
+
+cis_vals_m7   <- ecdf_df_plot_m7 %>% dplyr::filter(category == "cis")   %>% dplyr::pull(abs(effect_size))
+trans_vals_m7 <- ecdf_df_plot_m7 %>% dplyr::filter(category == "trans") %>% dplyr::pull(abs(effect_size))
+ks_res_m7 <- ks.test(cis_vals_m7, trans_vals_m7)
+ks_res_m7
+p_label_m7 <- paste0("P < ", round_up_signif(ks_res_m7$p.value))
+
+ecdf_plot_m7 <- ggplot2::ggplot(ecdf_df_plot_m7, ggplot2::aes(x = abs(effect_size), color = category)) +
+  ggplot2::stat_ecdf(linewidth = 1) +
+  ggplot2::annotate("text", x = -Inf, y = Inf, label = p_label_m7, hjust = -0.2, vjust = 2, size = 4, parse = TRUE) +
+  ggplot2::labs(x = "Absolute logFC", y = "Cumulative frequency", color = "") +
+  ggplot2::scale_color_manual(
+    values = c("cis" = "#009E73", "trans" = "#D55E00"),
+    labels = c(cis = expression(italic("cis")), trans = expression(italic("trans")))
+  ) +
+  ggplot2::coord_cartesian(xlim = c(0, 1.19)) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.border = ggplot2::element_rect(color = "black", linewidth = 1),
+    panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.4),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = c(0.9, 0.05),
+    legend.justification = c("right", "bottom"),
+    legend.background = ggplot2::element_rect(fill = scales::alpha("white", 0.7), color = NA),
+    legend.key = ggplot2::element_blank(),
+    axis.title = ggplot2::element_text(size = 14),
+    axis.text  = ggplot2::element_text(size = 12)
+  )
+```
+
+**Upper right panel -- mean *cis* proportion vs. number of cell types DD**
+(same construction as the "Mean cis proportion of DD genes" section above,
+on `dd_results_m7`).
+```{r}
+plot_df_b_m7 <- plot_df_long_sig_m7 %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(n_ct = dplyr::n(), mean_cis_prop = mean(cis_prop, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(n_ct = factor(n_ct, levels = sort(unique(n_ct))))
+
+n_ct_levels_m7 <- sort(unique(as.numeric(as.character(plot_df_b_m7$n_ct))))
+first_group_m7 <- as.character(min(n_ct_levels_m7))
+last_group_m7  <- as.character(max(n_ct_levels_m7))
+
+p_val_b_m7 <- wilcox.test(
+  mean_cis_prop ~ n_ct,
+  data = plot_df_b_m7 %>% dplyr::filter(n_ct %in% c(first_group_m7, last_group_m7))
+)$p.value
+p_label_b_m7 <- paste0("P < ", round_up_signif(p_val_b_m7))
+
+y_max_b_m7 <- max(plot_df_b_m7$mean_cis_prop, na.rm = TRUE)
+h_b_m7 <- 0.03
+y_pos_b_m7 <- y_max_b_m7 + 0.055
+x_start_b_m7 <- which(levels(plot_df_b_m7$n_ct) == first_group_m7)
+x_end_b_m7   <- which(levels(plot_df_b_m7$n_ct) == last_group_m7)
+x_mid_b_m7   <- mean(c(x_start_b_m7, x_end_b_m7))
+
+p_mean_cis_m7 <- ggpubr::ggboxplot(
+  plot_df_b_m7, x = "n_ct", y = "mean_cis_prop", fill = "n_ct", color = "black",
+  palette = "npg", add.params = list(width = 0.15, alpha = 0.5, size = 1)
+) +
+  scale_fill_viridis_d(option = "D", begin = 0.3, end = 1) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.2), expand = ggplot2::expansion(mult = 0.02)) +
+  annotate("segment", x = x_start_b_m7, xend = x_end_b_m7, y = y_pos_b_m7, yend = y_pos_b_m7) +
+  annotate("segment", x = x_start_b_m7, xend = x_start_b_m7, y = y_pos_b_m7, yend = y_pos_b_m7 - h_b_m7) +
+  annotate("segment", x = x_end_b_m7, xend = x_end_b_m7, y = y_pos_b_m7, yend = y_pos_b_m7 - h_b_m7) +
+  annotate("text", x = x_mid_b_m7, y = y_pos_b_m7 + h_b_m7, label = p_label_b_m7, size = 4, parse = TRUE) +
+  labs(
+    x = "Number of cell types DD in diploid",
+    y = expression(paste("Mean ", italic("cis"), " proportion"))
+  ) +
+  ggpubr::theme_pubr() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.line = element_blank(),
+    plot.margin = margin(5.5, 20, 5.5, 5.5)
+  ) +
+  coord_cartesian(ylim = c(0, y_pos_b_m7 + 0.05), clip = "off")
+```
+
+**Lower left panel -- LOEUF** and **lower right panel -- percent coding
+identity**, reusing the
+`lof_cutoff()`/`pci_cutoff()` functions defined earlier in this document
+(they take `dd_results` as a parameter, so no changes were needed -- just
+called on `dd_results_m7` instead) at the same 0.7/0.3 cutoff as the main
+analysis.
+```{r}
+p_lof_m7 <- lof_cutoff(dd_results_m7, lof_scores, 0.7, 0.3)
+p_pci_m7 <- pci_cutoff(dd_results_m7, mart, 0.7, 0.3)
+```
+
+```{r, fig.width=12, fig.height=10}
+library(patchwork)
+p_cistrans_m7 <- (ecdf_plot_m7 + p_mean_cis_m7) / (p_lof_m7 + p_pci_m7)
+p_cistrans_m7
+# ggsave(paste0(results_path, 'supplement/cis_trans_mean_cutoff_m7/cis_trans_replication_m7.pdf'), plot = p_cistrans_m7, device = "pdf", width = 12, height = 10, units = "in")
+```
+
+At a stricter -7 mean-expression cutoff, the cis/trans results replicate:
+the ECDF separation between *cis* and *trans* effect sizes remains highly
+significant (upper left), mean *cis* proportion still rises with the number
+of cell types a gene is DD in (upper right), and the LOEUF/percent-coding-
+identity comparisons between *cis* and *trans* genes (bottom row) retain the
+same direction and remain significant. Removing the -6-to-7 boundary genes
+(`r sum(sapply(fail_minus7_by_ct, length))` gene x cell type instances
+removed in total, `r sum(!is.na(dd_results$dd.in.diploid.mean.cis.proportion)) - sum(!is.na(dd_results_m7$dd.in.diploid.mean.cis.proportion))`
+fewer genes with a defined overall mean *cis* proportion) doesn't change any
+of the qualitative conclusions.
+
+
+## Supplementary: Cell Counts
+
+Updated to the current diploid/allotetraploid annotation dataset
+(`data/cell_annotations/diploid_metadata.csv`, `tetraploid_metadata.csv` --
+see `cell_annotations_diploid_lines.Rmd`), covering all 20 cell types used
+throughout this document (previously only 5).
+
+Cell counts here **exclude the same donor x cell-type combinations dropped
+by the `memento_min_cells_per_group` (100-cell) filter** used upstream in
+the DD/DE pipeline (see `q_threshold_sensitivity.Rmd` Section 8b for the
+original diagnosis, and `diploid_pseudobulk_ct.R` / `memento_diploid.py` for
+where the filter is applied). Without this, the cell counts shown here
+would imply more replication than the DD/DE numbers actually reflect.
+
+```{r}
+diploid_meta_path <- '/project/gilad/awchen55/mechanism/data/cell_annotations/diploid_metadata.csv'
+
+diploid_metadata_raw <- readr::read_csv(
+  diploid_meta_path,
+  col_select = c(cell_barcode, donor_id, species, celltype),
+  show_col_types = FALSE
+) %>%
+  dplyr::filter(celltype %in% celltypes_display, !is.na(species), !is.na(donor_id))
+
+# Donor x cell-type combinations excluded from DD/DE (n_cells < 100), computed
+# directly from the diploid metadata at the same threshold as
+# memento_min_cells_per_group (see memento_diploid.py / config.yaml), rather
+# than a manually-maintained table.
+excluded_donor_celltypes <- diploid_metadata_raw %>%
+  dplyr::count(celltype, species, donor_id, name = "n_cells") %>%
+  dplyr::filter(n_cells < 100)
+
+cat("Excluded donor x cell-type combinations:", nrow(excluded_donor_celltypes), "\n")
+```
+
+```{r}
+diploid_metadata <- diploid_metadata_raw %>%
+  dplyr::anti_join(excluded_donor_celltypes, by = c("celltype", "species", "donor_id"))
+
+cat("Diploid cells after excluding low-count donors:", nrow(diploid_metadata), "\n")
+```
+
+```{r fig.width=11, fig.height=6}
+diploid_counts <- diploid_metadata %>%
+  dplyr::count(celltype, species, name = "cell_count") %>%
+  dplyr::mutate(species = dplyr::recode(species, chimp = "Chimpanzee", human = "Human"))
+
+# Allotetraploid: one genome copy per cell (species == "human" barcodes),
+# matching the convention already used elsewhere in this document.
+allo_counts <- metadata_tetraploid %>%
+  dplyr::filter(
+    stringr::str_starts(cell_barcode, "human_"),
+    celltype != "unassigned",
+    celltype %in% celltypes_display
+  ) %>%
+  dplyr::count(celltype, name = "cell_count") %>%
+  dplyr::mutate(species = "Allotetraploid")
+
+plot_df <- dplyr::bind_rows(diploid_counts, allo_counts)
+
+celltype_order_counts <- plot_df %>%
+  dplyr::group_by(celltype) %>%
+  dplyr::summarise(total = sum(cell_count), .groups = "drop") %>%
+  dplyr::arrange(dplyr::desc(total)) %>%
+  dplyr::pull(celltype)
+
+plot_df <- plot_df %>%
+  dplyr::mutate(
+    celltype = factor(celltype, levels = celltype_order_counts),
+    species  = factor(species, levels = c("Human", "Chimpanzee", "Allotetraploid"))
+  )
+
+dodge <- position_dodge(width = 0.9)
+
+p_cell_counts <- ggplot(plot_df, aes(x = celltype, y = cell_count, fill = species)) +
+  geom_col(
+    position = dodge,
+    width = 0.75,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_text(
+    aes(label = scales::comma(cell_count)),
+    position = dodge,
+    vjust = 0.5,
+    hjust = -0.2,
+    angle = 90,
+    size = 4
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Human" = "#D55E00",
+      "Chimpanzee" = "#0072B2",
+      "Allotetraploid" = "#009E73"
+    )
+  ) +
+  scale_y_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    x = "",
+    y = "Number of cells",
+    fill = ""
+  ) +
+  coord_cartesian(ylim = c(0, max(plot_df$cell_count, na.rm = TRUE) * 1.1), clip = "off") +
+  theme_classic(base_size = 12) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.y = element_text(size = 15),
+    legend.position = "top",
+    plot.margin = margin(10,10,10,10)
+  )
+
+p_cell_counts
+# ggsave(paste0(results_path, 'supplement/cell_type_proportions/cellcounts.pdf'), plot = p_cell_counts, device = "pdf", width = 20, height = 7, units = "in")
+```
+
+### Cell counts by individual donor
+
+Total cell count per individual donor (low-count donor x cell-type
+combinations excluded, restricted to the 20 cell types used throughout this
+analysis), plus one combined bar for the allotetraploid line. The
+allotetraploid has no separate donors/individuals -- it's a single hybrid
+line -- and each hybrid cell contributes both a human-allele and a
+chimp-allele row, so we count only the human-allele rows (same convention
+used for allotetraploid cell counts elsewhere in this document) to avoid
+double-counting. Bars are ordered allotetraploid first, then chimp
+individuals, then human individuals, descending by cell count within each
+group.
+
+```{r}
+donor_counts <- diploid_metadata %>%
+  dplyr::count(species, donor_id, name = "n_cells") %>%
+  dplyr::mutate(species = dplyr::recode(species, chimp = "Chimpanzee", human = "Human"))
+
+allo_total <- metadata_tetraploid %>%
+  dplyr::filter(
+    stringr::str_starts(cell_barcode, "human_"),
+    celltype != "unassigned",
+    celltype %in% celltypes_display
+  ) %>%
+  nrow()
+
+donor_counts <- dplyr::bind_rows(
+  donor_counts,
+  # HLI-25: the allotetraploid hybrid line ID (not present in the metadata,
+  # added manually).
+  tibble::tibble(species = "Allotetraploid", donor_id = "HLI-25", n_cells = allo_total)
+)
+
+order_within <- function(sp) {
+  donor_counts %>%
+    dplyr::filter(species == sp) %>%
+    dplyr::arrange(dplyr::desc(n_cells)) %>%
+    dplyr::pull(donor_id)
+}
+
+donor_order <- c("HLI-25", order_within("Chimpanzee"), order_within("Human"))
+
+donor_counts
+```
+
+```{r fig.width=15, fig.height=6}
+
+donor_counts <- donor_counts %>%
+  dplyr::mutate(
+    donor_id = factor(donor_id, levels = donor_order),
+    species  = factor(species, levels = c("Allotetraploid", "Chimpanzee", "Human"))
+  )
+
+p_donor_counts <- ggplot(
+  donor_counts,
+  aes(x = donor_id, y = n_cells, fill = species)
+) +
+  geom_col(color = "black", linewidth = 0.3) +
+  geom_text(aes(label = scales::comma(n_cells)), vjust = -0.3, size = 6) +
+  scale_fill_manual(values = c(
+    "Human" = "#D55E00", "Chimpanzee" = "#0072B2", "Allotetraploid" = "#009E73"
+  )) +
+  scale_y_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(x = "", y = "Number of cells", fill = "") +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.ticks = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(6, "pt"),
+    legend.position = "top",
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 18)
+  )
+
+p_donor_counts
+# ggsave(paste0(results_path, 'supplement/cell_type_proportions/donor_cellcounts.pdf'), plot = p_donor_counts, device = "pdf", width = 15, height = 6, units = "in")
+```
+
+### Cell type proportions by individual donor
+
+For each of the 20 cell types, what fraction of that cell type's cells come from each
+individual donor -- but using the filtered data above (excluded low-count
+donors removed) and all 20 cell types rather than the full annotation set.
+
+```{r fig.width=8, fig.height=7}
+shared_celltype_order <- diploid_metadata %>%
+  dplyr::count(celltype, name = "total_cells") %>%
+  dplyr::arrange(dplyr::desc(total_cells)) %>%
+  dplyr::pull(celltype)
+
+make_species_prop_plot <- function(metadata_df, species_name, title, celltype_order) {
+  plot_df <- metadata_df %>%
+    dplyr::filter(species == species_name, celltype %in% celltype_order) %>%
+    dplyr::count(celltype, donor_id, name = "cell_count") %>%
+    dplyr::group_by(celltype) %>%
+    dplyr::mutate(proportion = cell_count / sum(cell_count)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(celltype = factor(celltype, levels = rev(celltype_order)))
+
+  ggplot(plot_df, aes(x = proportion, y = celltype, fill = donor_id)) +
+    geom_col(width = 0.8) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1), expand = c(0, 0)) +
+    labs(title = title, x = "Proportion of cells", y = "", fill = "Individual") +
+    theme_classic() +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      axis.text.y   = element_text(size = 9),
+      legend.position = "right"
+    )
+}
+
+p_human_prop <- make_species_prop_plot(diploid_metadata, "human", "Human",      shared_celltype_order)
+p_chimp_prop <- make_species_prop_plot(diploid_metadata, "chimp", "Chimpanzee", shared_celltype_order)
+
+p_human_prop
+p_chimp_prop
+ggsave(paste0(results_path, 'supplement/cell_type_proportions/human_diploid_celltype_prop.pdf'), plot = p_human_prop, device = "pdf", width = 8, height = 7, units = "in")
+ggsave(paste0(results_path, 'supplement/cell_type_proportions/chimp_diploid_celltype_prop.pdf'), plot = p_chimp_prop,  device = "pdf", width = 8, height = 7, units = "in")
+```
+
+
+
+
+
