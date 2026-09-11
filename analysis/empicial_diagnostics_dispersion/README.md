@@ -2,8 +2,6 @@
 
 The purpose of this study is to further characterize **total variability** and **dispersion** as memento estimates them, and to empirically diagnose how reliable those estimates are. Total variability is a gene's raw (mean-uncorrected) variance; dispersion is the residual left after regressing out the mean-variance trend across genes, i.e. the portion of a gene's variability not explained by its mean expression level alone. This document works through: how memento actually computes those two quantities, how much of a gene's total variability its dispersion estimate captures, whether the dispersion estimate still depends on mean expression after that correction, how reproducible it is across individuals/donors, and how sensitive it is to per-sample cell count.
 
-> **Note:** the sentence introducing this README was cut off in the request that produced it ("...the purpose of this study was to further define total variability and dispersion, where"). The paragraph above is my best reconstruction from the document's own content (see the "Total variability decomposition" section) — please correct it if it doesn't match what you intended.
-
 ## `dispersion_diagnostics.Rmd`
 
 Two datasets are used throughout:
