@@ -1,0 +1,803 @@
+---
+title: "Dispersion Estimate Diagnostics"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+date: "2026-07-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5)
+```
+
+```{r packages}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggrepel)
+library(purrr)
+
+MEMENTO_DIR <- "/project/gilad/brendan/dispersion/pilot/cHDC_data/cellranger_cluster-mode_trial/analysis/datasets/memento"
+
+CELL_TYPES <- c("Cardiac_fibroblasts", "Activated_fibroblasts", "Cardiomyocytes",
+                "Epithelial_cells", "Mesenchymal_cells", "Foregut_endodermal_cells")
+INDIVIDUALS <- c("NA19099", "NA19093", "NA18522")
+
+theme_diag <- theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(),
+        strip.background = element_blank())
+
+# Replace underscores with spaces when displaying cell type names in titles/labels
+ct_label <- function(x) gsub("_", " ", x)
+
+results_path <- '/project/gilad/awchen55/differentialDispersion/analysis/dispersion_diagnostics/figure/'
+```
+
+## Load Data
+
+```{r load}
+res_var_wide <- read.csv(
+  file.path(MEMENTO_DIR, "new_res_var_by_cell_type_ind_1000_cts_new_predicted_id.csv"),
+  row.names = 1, check.names = FALSE
+)
+mean_wide <- read.csv(
+  file.path(MEMENTO_DIR, "new_mean_expression_by_cell_type_ind_1000_cts_new_predicted_id.csv"),
+  row.names = 1, check.names = FALSE
+)
+
+cat("Residual variance matrix:", nrow(res_var_wide), "genes ×", ncol(res_var_wide), "columns\n")
+cat("Mean expression matrix:  ", nrow(mean_wide),    "genes ×", ncol(mean_wide),    "columns\n")
+cat("Columns:", paste(colnames(res_var_wide), collapse = ", "), "\n")
+```
+
+```{r tidy}
+# Pivot to long format: gene, individual, celltype, res_var, mean
+rv_long <- res_var_wide |>
+  tibble::rownames_to_column("gene") |>
+  pivot_longer(-gene, names_to = "sample", values_to = "res_var") |>
+  mutate(individual = sub("_.*", "", sample),
+         celltype   = sub("^[^_]+_", "", sample))
+
+mn_long <- mean_wide |>
+  tibble::rownames_to_column("gene") |>
+  pivot_longer(-gene, names_to = "sample", values_to = "mean_expr") |>
+  mutate(individual = sub("_.*", "", sample),
+         celltype   = sub("^[^_]+_", "", sample))
+
+df <- inner_join(rv_long, mn_long, by = c("gene", "sample", "individual", "celltype")) |>
+  filter(!is.na(res_var), !is.na(mean_expr))
+
+cat("Long-format rows:", nrow(df), "\n")
+```
+
+Shared filters and a per-cell-type-averaged view of `df`, used by several
+sections below (Section 5 introduces the expression cutoff itself; Section
+3 applies it together with the mito/ribo gene filter).
+
+```{r shared_filters}
+CUTOFF <- -6
+
+# Mitochondrial (MT-), mitochondrial ribosomal (MRPL/MRPS), and ribosomal
+# protein (RPL/RPS) genes.
+is_mito_ribo <- function(g) grepl("^MT-|^MRPL|^MRPS|^RPL|^RPS", g)
+
+# One row per gene x cell type (mean expression averaged across individuals),
+# for Section 5's per-cell-type cutoff table.
+df_ct_avg <- df |>
+  group_by(gene, celltype) |>
+  summarise(mean_expr = mean(mean_expr, na.rm = TRUE), .groups = "drop")
+```
+
+---
+
+
+# 1. Total Variability Decomposition
+
+What fraction of a gene's total (raw 2nd-moment) variability is captured by
+memento's mean-corrected dispersion estimate? Three quantities, all computed
+per gene x cell type x ploidy x species x donor (diploid) or x species
+(tetraploid, no donor level) by `memento_variance_decomposition.py`
+(mechanism project):
+
+## How memento estimates mean and dispersion
+
+Memento estimates each gene's mean and variance with a hypergeometric
+method-of-moments estimator, modeling observed UMI counts as a
+hypergeometric sample of a cell's true transcript pool (Kim et al. 2024,
+PMC11556465, Equation 8):
+
+$$\hat{\mu}_g = \frac{1}{n_{cells}} \sum_c \frac{Y_{cg}}{N_c \, q}$$
+
+$$\hat{\sigma}_g^2 = \frac{1}{n_{cells}} \sum_c \frac{Y_{cg}^2 - Y_{cg}(1 - q)}{N_c^2 \, q^2} - \hat{\mu}_g^2$$
+
+where, for gene $g$:
+
+- $Y_{cg}$ -- the observed (sequenced) UMI count for gene $g$ in cell $c$.
+- $N_c$ -- the total UMI count (total transcript count) of cell $c$.
+- $q$ -- the capture efficiency: the assumed probability that a true
+  transcript molecule in a cell is captured and sequenced (`memento_q` in
+  this project's pipeline config; the same value is used for every cell in
+  a given memento run).
+- $n_{cells}$ -- the number of cells in the group being estimated (e.g.
+  one species x donor x cell-type sample).
+- $\hat{\mu}_g$ -- the estimated mean (true relative expression) of gene
+  $g$.
+- $\hat{\sigma}_g^2$ -- the estimated variance of gene $g$.
+
+The $Y_{cg}(1 - q)$ term corrects the raw second moment for the extra
+sampling variance introduced purely by imperfect capture -- without it,
+$\hat{\sigma}_g^2$ would be a biased, capture-noise-inflated estimate of
+the gene's true variance, and cells with lower $q$ would look spuriously
+more variable for purely technical reasons.
+
+Memento's actual implementation (`_hyper_1d_relative` in `estimator.py`,
+the function this project's pipeline calls) computes an algebraically
+equivalent quantity in *relative* units: it doesn't divide the mean by $q$,
+and its raw second moment isn't divided by $q^2$ -- i.e. it computes
+$q \, \hat{\mu}_g$ and $q^2 \, \hat{\sigma}_g^2$ from the equations above.
+Since the same $q$ is used for every gene within one memento run, this is a
+constant rescaling (an additive shift in log space) that leaves the
+mean-variance trend fit's residuals -- and therefore `log.dispersion`,
+defined below -- exactly unchanged.
+
+This per-gene `(mean, variance)` pair -- one point per gene -- is what
+feeds the mean-variance trend fit and dispersion definition below.
+
+Final column set in `all_celltypes_variance_genes.csv` (`gene`, `celltype`,
+`ploidy`, `species`, `donor` identify the row; the rest are described
+below, in file order):
+
+- **`log.mean`** -- $\log(\hat{\mu}_g)$, memento's own log(mean) estimate
+  (the mean value `get_1d_moments()` normally returns), unchanged from the
+  rest of this project's convention.
+- **`log.dispersion`** -- memento's own mean-corrected dispersion (residual
+  variance), matching this project's standard convention. Writing
+  $V = \hat{\sigma}_g^2$ for the gene's raw (total) variance and $E$ for the
+  mean-variance trend's fitted value at that gene's mean (defined in
+  `log.mean.component.of.variance` below), dispersion in log space is
+  simply the log of their ratio:
+
+  $$\log(\text{dispersion}) = \log(V) - \log(E) = \log(V / E)$$
+
+  Across all genes in a sample, memento fits
+  $\log(V) \sim \text{poly}(\log(\hat{\mu}_g), \text{degree}=2)$
+  (`_fit_mv_regressor`) to obtain $\log(E)$ at each gene's mean, then computes
+  `log.dispersion` $= \log(V) - \log(E)$ and `exp(log.dispersion)` $= V/E$
+  (`_residual_variance`) -- i.e. dispersion is a RATIO relative to that
+  fitted trend, not a variance component in the same additive units as the
+  gene's raw variance. `log.dispersion = 0` means "exactly on-trend" for a
+  gene at that mean (the linear ratio would be 1); call this value `r` below.
+- **`log.mean.component.of.variance`** -- $\log(E)$, the mean-variance
+  trend's fitted value at gene $g$'s mean expression ($E =
+  \exp(\text{fitted\_trend}(\log(\hat{\mu}_g)))$, equivalently the gene's
+  raw variance divided by `exp(log.dispersion)`, i.e. $E = V / \exp(r)$).
+  This is "what variance this gene would have if it behaved exactly like a
+  typical gene at this expression level" -- the mean-driven baseline that
+  the gene's actual variance gets compared against to define dispersion.
+- **`log.total.variability`** -- $\log(V)$, where $V = \hat{\sigma}_g^2$ is
+  memento's raw 2nd moment (`Var[X]` of its internal
+  capture-efficiency-corrected relative-expression estimate) -- computed
+  inside `memento.compute_1d_moments()` but discarded by its normal API
+  (`get_1d_moments()`, which only returns log(mean) and log(residual
+  variance)) -- pulled directly out of
+  `adata.uns['memento']['1d_moments'][group][1]` before it's dropped (see
+  `memento_variance_decomposition.py`'s docstring for the full derivation).
+  Satisfies the exact identity $\log(V) = \log(E) + r$, i.e.
+  `log.total.variability = log.mean.component.of.variance + log.dispersion`
+  (verified to floating-point precision, ~1e-15). Note that being on the
+  same *scale* (all natural log)
+  doesn't put them in the same *range*: `log.total.variability` and
+  `log.mean.component.of.variance` both run roughly -21 to -11 here (since the
+  underlying variances are tiny on memento's relative-abundance scale),
+  while `log.dispersion` runs roughly -2 to +4 (since it's a ratio centered
+  at 0, not a raw variance) -- that gap is a real feature of the data (the
+  large negative offset shared by `V` and `E`), not an artifact of logging
+  them.
+- **`percent.variability.that.is.dispersion`** -- a point-wise metric,
+  bounded 0-1 (a fraction, not a `*100` percentage), for how much of an
+  individual gene's variance is accounted for by dispersion rather than by
+  the mean-variance trend. Taking the absolute value of the log residual
+  `r = log.dispersion` before exponentiating gives a formula that is
+  bounded on *both* sides by construction:
+
+  `percent.variability.that.is.dispersion = 1 - exp(-|r|)`
+
+  This handles both directions of the residual symmetrically:
+    - **`r > 0` (overdispersion):** simplifies to `(V - E) / V` -- the
+      exact fraction of the gene's own *observed* variance that is
+      "excess" dispersion above the mean trend.
+    - **`r < 0` (underdispersion):** simplifies to `(E - V) / E` -- the
+      fraction of the *expected* variance that the gene failed to reach.
+    - **`r = 0`:** the gene sits exactly on the mean-variance trend -- 0
+      ("perfect fit," no dispersion contribution either way).
+
+  Example: `r = 0.223` (mild overdispersion) gives `1 - e^{-0.223} ~= 0.20`
+  ("the dispersion excess makes up 20% of the observed variance"); `r =
+  -0.223` (an equally-sized deviation in the other direction) gives the
+  *same* 0.20 ("the observed variance is 20% deflated relative to the
+  trend line") -- the magnitude of the deviation is treated identically
+  regardless of direction, even though `r > 0` and `r < 0` are dividing by
+  different denominators (`V` vs. `E`) under the hood.
+- **`percent.variability.that.is.mean`** -- the direct complement,
+  `exp(-|r|) = 1 - percent.variability.that.is.dispersion`, using the same
+  `r = log.dispersion` value. A gene sitting exactly on-trend (`r = 0`)
+  reads 1 here (all of its variance is consistent with what mean alone
+  predicts); as dispersion becomes extreme in either direction, this falls
+  toward 0. The two `percent.variability.*` columns always sum to exactly
+  1 by construction (verified to floating-point precision, ~1e-14).
+
+**Not accounted for here:** the production DD test
+(`diploid_dd_limma_ct.R`) runs `limma::normalizeQuantiles()` on the
+per-celltype dispersion matrix (across donor columns) before testing for a
+species effect -- i.e. the `dd.lfsr`/`dd.logFC` significance calls operate
+on quantile-normalized dispersion, not the raw `exp(log.dispersion)` values
+used throughout this section. That's a deliberate choice: this section
+characterises memento's dispersion *estimator* itself (is it mean-corrected,
+how much of a gene's variance does it capture), which is a different
+question from what the downstream cross-donor significance test sees after
+its own normalization. Don't use these per-gene percentages to explain a
+specific `dd.lfsr` call without re-deriving them on the quantile-normalized
+values first.
+
+
+```{r tv_load}
+tv_data_path <- '/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/variance_decomposition/'
+
+tv_summary <- read.csv(paste0(tv_data_path, "all_celltypes_variance_summary.csv"))
+tv_genes   <- read.csv(paste0(tv_data_path, "all_celltypes_variance_genes.csv"))
+
+tv_genes_cm <- tv_genes |>
+  dplyr::filter(celltype == "Cardiomyocytes", ploidy == "diploid",
+                is.finite(log.dispersion)) |>
+  dplyr::mutate(panel = paste0(species, " - ", donor))
+
+tv_summary_cm <- tv_summary |>
+  dplyr::filter(celltype == "Cardiomyocytes", ploidy == "diploid") |>
+  dplyr::mutate(panel = paste0(species, " - ", donor))
+```
+
+```{r}
+tv_genes_cm
+tv_summary_cm
+```
+
+# 2. Mean Dependence
+
+Does the residual variance estimate still correlate with mean expression?
+Memento corrects for mean internally, so we expect little residual association.
+Each point is one gene × individual × cell type; no expression or gene
+filtering applied here.
+
+```{r mean_dependence_raw, fig.width = 12, fig.height = 16}
+ggplot(df, aes(x = mean_expr, y = res_var)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(alpha = 0.25, size = 0.6, colour = "grey30") +
+  facet_grid(celltype ~ individual, labeller = labeller(celltype = ct_label)) +
+  labs(x = "Log mean expression", y = "Residual variance") +
+  theme_diag
+```
+
+---
+
+# 3. LOESS Mean Dependence After Expression Cutoff (log mean ≤ -6)
+
+Repeat the mean-dependence check above, restricted to genes that pass the
+`-6` log mean expression cutoff (genes with log mean > -6 excluded) **and**
+with mitochondrial/ribosomal genes removed (`MT-`, `MRPL`/`MRPS`, `RPL`/`RPS`),
+to check whether residual mean dependence stays flat once high-expression
+genes above the cutoff and these housekeeping genes are removed.
+
+Full cell type × individual grid (18 panels), showing every retained gene as a
+point (not just the smoothed line/ribbon), so raw scatter and per-panel LOESS
+fit can be inspected together. Axes are left free per panel (not forced to the
+tiny fitted-value range) since raw per-gene residual variance is far noisier
+than the smoothed curve.
+
+```{r loess_filtered_setup}
+raw_ind_df_filt <- df |>
+  filter(mean_expr <= CUTOFF, !is_mito_ribo(gene))
+
+# Per-panel LOESS fit (with 95% CI), used as the smoothed overlay in the plot
+# below. Panels with too few genes to fit reliably (n < 10) are skipped.
+loess_ind_df_filt <- raw_ind_df_filt |>
+  group_by(celltype, individual) |>
+  group_modify(function(sub, ...) {
+    if (nrow(sub) < 10) return(tibble())
+    fit  <- loess(res_var ~ mean_expr, data = sub, span = 0.5)
+    grid <- tibble(mean_expr = seq(min(sub$mean_expr), max(sub$mean_expr), length.out = 100))
+    pred <- predict(fit, newdata = grid, se = TRUE)
+    grid |> mutate(fitted = pred$fit,
+                    lower  = pred$fit - 1.96 * pred$se.fit,
+                    upper  = pred$fit + 1.96 * pred$se.fit)
+  }) |>
+  ungroup()
+```
+
+```{r loess_per_individual_points_filtered, fig.width = 12, fig.height = 16}
+ggplot(raw_ind_df_filt, aes(x = mean_expr, y = res_var)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(alpha = 0.25, size = 0.6, colour = "grey30") +
+  geom_ribbon(data = loess_ind_df_filt,
+              aes(x = mean_expr, ymin = lower, ymax = upper, y = NULL),
+              inherit.aes = FALSE, alpha = 0.3, fill = "#4575b4") +
+  geom_line(data = loess_ind_df_filt, aes(x = mean_expr, y = fitted),
+            inherit.aes = FALSE, colour = "#4575b4", linewidth = 0.9) +
+  facet_grid(celltype ~ individual, labeller = labeller(celltype = ct_label)) +
+  labs(x = "Log mean expression", y = "Residual variance",
+       subtitle = paste0("Genes with log mean ≤ ", CUTOFF,
+                          " and mito/ribo genes removed; each point is one gene; ",
+                          "LOESS ± 95% CI per cell type × individual")) +
+  theme_diag
+```
+
+---
+
+## 3b. Same Diagnostic, Mechanism Project (Human/Chimp Diploid + Allotetraploid)
+
+**Note:** unlike every other section in this document, this subsection uses a
+**different dataset** entirely -- the Gilad lab "mechanism" project's
+human/chimp diploid + allotetraploid `memento` output (not the cHDC cardiac
+pilot data used everywhere else here). It repeats the same mean-dependence
+LOESS diagnostic (mito/ribo genes removed, log mean ≤ -6) for:
+
+- **Diploid human** and **diploid chimp** -- full cell type × donor grid
+  (7 donors per species, ~20 cell types), analogous to the cardiac
+  per-individual grid above. Log mean ≤ -6 (same cutoff as the rest of this
+  document), and donor × cell-type groups with fewer than `MIN_CELLS` = 100
+  cells are excluded (see below).
+- **Tetraploid human** and **tetraploid chimp** -- a single pooled line per
+  cell type, restricted to the 20 cell types that overlap with diploid
+  (tetraploid has one extra, `Early_mesoderm_cells`, with no diploid
+  counterpart, so it's dropped here). The `memento_tetraploid_dd_ct` pipeline
+  groups tetraploid cells by allele-of-origin (`species`) × cell type only,
+  with no donor/replicate level (there is only one tetraploid line in this
+  dataset), so a per-individual breakdown isn't possible here the way it is
+  for diploid. Uses the same log mean ≤ -6 cutoff as diploid.
+
+Source data is `mt_rb_mean_filtered_q_thresholds/q0.2/memento/` from the
+mechanism project. We use three filters throughout: mitochondrial/ribosomal
+gene removal, a log-mean-expression cutoff of -6, and a minimum of 100
+cells per donor x cell-type group. All three are already applied upstream
+by the pipeline that produced this data; they are reapplied explicitly
+below so the filtering this section depends on is visible directly in this
+document.
+
+```{r mech_loess_setup}
+MECH_DIR <- "/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/memento"
+
+ct_label_us <- function(x) gsub("_", " ", x)
+
+# Wrapped variant used only for the mean-independence loess grids below --
+# long names (e.g. "Bronchiolar and alveolar epithelial cells") otherwise
+# overflow the facet panel/strip and get cropped out of the saved plot.
+ct_label_us_wrapped <- function(x, wrap_width = 18) {
+  stringr::str_wrap(gsub("_", " ", x), width = wrap_width)
+}
+
+mech_celltypes_for <- function(dir, prefix) {
+  list.files(dir, pattern = paste0("^", prefix, "_.*\\.csv$")) |>
+    sub(paste0("^", prefix, "_"), "", x = _) |>
+    sub("\\.csv$", "", x = _)
+}
+
+mech_read_ct <- function(dir, prefix, ct, ploidy) {
+  mean_f <- file.path(dir, paste0(prefix, "_mean_", ct, ".csv"))
+  var_f  <- file.path(dir, paste0(prefix, "_var_",  ct, ".csv"))
+  if (!file.exists(mean_f) || !file.exists(var_f)) return(NULL)
+
+  mean_long <- read.csv(mean_f, check.names = FALSE) |>
+    pivot_longer(-gene, names_to = "sample", values_to = "mean_expr")
+  var_long <- read.csv(var_f, check.names = FALSE) |>
+    pivot_longer(-gene, names_to = "sample", values_to = "res_var")
+
+  inner_join(mean_long, var_long, by = c("gene", "sample")) |>
+    mutate(ploidy   = ploidy,
+           celltype = ct,
+           species  = sub("^sg\\^([^^]+)\\^.*$", "\\1", sample),
+           donor    = sub("^sg\\^[^^]+\\^", "", sample)) |>
+    filter(!is.na(mean_expr), !is.na(res_var))
+}
+
+mech_dip_cts_all <- mech_celltypes_for(MECH_DIR, "diploid_memento_mean")
+mech_tet_cts_all <- mech_celltypes_for(MECH_DIR, "tetraploid_memento_mean")
+
+# Tetraploid has one extra cell type (Early_mesoderm_cells) with no diploid
+# counterpart -- restrict to the 20 that overlap so every tetraploid panel
+# here has a matching diploid comparison above.
+mech_dip_cts <- mech_dip_cts_all
+mech_tet_cts <- intersect(mech_tet_cts_all, mech_dip_cts_all)
+cat("Tetraploid cell types dropped (no diploid counterpart):",
+    paste(setdiff(mech_tet_cts_all, mech_dip_cts_all), collapse = ", "), "\n")
+
+# Reuses CUTOFF (-6) and is_mito_ribo(), defined above -- applied explicitly
+# here (in addition to being applied upstream by the pipeline) for clarity.
+mech_dip_df <- map_dfr(mech_dip_cts, ~ mech_read_ct(MECH_DIR, "diploid_memento", .x, "Diploid")) |>
+  filter(mean_expr <= CUTOFF, !is_mito_ribo(gene))
+mech_tet_df <- map_dfr(mech_tet_cts, ~ mech_read_ct(MECH_DIR, "tetraploid_memento", .x, "Tetraploid")) |>
+  filter(mean_expr <= CUTOFF, !is_mito_ribo(gene))
+
+# Exclude diploid donor x cell-type groups with fewer than MIN_CELLS cells,
+# the third of our three filters (see below for why). Computed directly from
+# the raw diploid metadata, matched on (species, donor, celltype); celltype
+# names there use spaces where the memento output uses underscores, so
+# normalise before joining.
+MIN_CELLS <- 100
+
+diploid_meta_for_counts <- read.csv(
+  "/project/gilad/awchen55/mechanism/data/cell_annotations/diploid_metadata.csv"
+) |>
+  mutate(celltype = gsub(" ", "_", celltype))
+
+low_count_combos <- diploid_meta_for_counts |>
+  filter(celltype %in% mech_dip_cts) |>
+  count(species, donor_id, celltype, name = "n_cells") |>
+  filter(n_cells < MIN_CELLS) |>
+  rename(donor = donor_id)
+
+cat("Diploid donor x cell-type combos excluded (< ", MIN_CELLS, " cells): ",
+    nrow(low_count_combos), "\n", sep = "")
+
+mech_dip_df <- mech_dip_df |>
+  anti_join(low_count_combos, by = c("species", "donor", "celltype"))
+
+cat("Diploid rows:", nrow(mech_dip_df), "| cell types:", length(mech_dip_cts), "\n")
+cat("Diploid donors -- chimp:", length(unique(mech_dip_df$donor[mech_dip_df$species == "chimp"])),
+    "human:", length(unique(mech_dip_df$donor[mech_dip_df$species == "human"])), "\n")
+cat("Tetraploid rows:", nrow(mech_tet_df), "| cell types:", length(mech_tet_cts), "\n")
+```
+
+```{r mech_loess_diploid_grid, fig.width = 15, fig.height = 32}
+MECH_OUTDIR <- "/project/gilad/awchen55/mechanism/results/dispersion_paper/supplement/mean_independence_loess/"
+
+mech_make_grid_plot <- function(sp) {
+  sub <- filter(mech_dip_df, species == sp)
+  ggplot(sub, aes(x = mean_expr, y = res_var)) +
+    geom_point(alpha = 0.15, size = 0.3, colour = "grey30") +
+    geom_smooth(method = "loess", span = 0.5, colour = "#d73027", linewidth = 0.5, se = TRUE) +
+    facet_grid(celltype ~ donor, labeller = labeller(celltype = ct_label_us_wrapped)) +
+    labs(x = "Mean", y = "Dispersion") +
+    theme_diag +
+    theme(strip.text.y = element_text(angle = 0, size = 13), strip.text.x = element_text(size = 7),
+          axis.title = element_text(size = 16))
+}
+
+for (sp in c("human", "chimp")) {
+  p <- mech_make_grid_plot(sp)
+  print(p)
+  n_ct <- length(unique(filter(mech_dip_df, species == sp)$celltype))
+  n_donor <- length(unique(filter(mech_dip_df, species == sp)$donor))
+  # ggsave(file.path(MECH_OUTDIR, paste0(sp, "_diploid_mean_independence_loess.png")),
+  #        plot = p, width = max(10, n_donor * 2.2), height = max(10, n_ct * 1.6), limitsize = FALSE, dpi = 150)
+}
+```
+
+Without the `MIN_CELLS` filter, individual donors with very few cells in a
+given cell type (human `NA18913`; chimp `C3651`, `C4955`, `C40280`) show a
+fanned, sharply-descending cluster of points in several neural-lineage cell
+types (Ciliated epithelial cells, ENS glia, Glioblast, Neuroblast, Neuron,
+Retinal neurons) -- the same low-cell-count numerical artifact documented
+for chimp donors in `q_threshold_sensitivity.Rmd` Section 8b (memento's
+moment-based dispersion estimator collapsing to near-identical,
+artificially very-negative values when a donor has too few cells in a cell
+type). Every one of those donor × cell-type combos has well under 100 cells
+(e.g. chimp `C3651` Glioblast = 4 cells; human `NA18913` Neuron = 29 cells),
+confirming the artifact affects human donors as well as chimp. The
+100-cell exclusion above removes all of these from the grids.
+
+```{r mech_loess_tetraploid, fig.width = 13, fig.height = 10}
+mech_make_tet_plot <- function(sp) {
+  sub <- filter(mech_tet_df, species == sp)
+  ggplot(sub, aes(x = mean_expr, y = res_var)) +
+    geom_point(alpha = 0.15, size = 0.4) +
+    geom_smooth(method = "loess", span = 0.5, colour = "red", linewidth = 0.7, se = TRUE) +
+    facet_wrap(~ celltype, ncol = 5, labeller = labeller(celltype = ct_label_us_wrapped)) +
+    labs(x = "Mean", y = "Dispersion") +
+    theme_diag +
+    theme(strip.text = element_text(size = 10), axis.title = element_text(size = 16))
+}
+
+for (sp in c("human", "chimp")) {
+  p <- mech_make_tet_plot(sp)
+  print(p)
+  # ggsave(file.path(MECH_OUTDIR, paste0(sp, "_allotetraploid_mean_independence_loess.png")),
+  #        plot = p, width = 13, height = 10, dpi = 150)
+}
+```
+
+
+# 4. Reproducibility Across Individuals
+
+Pairwise Spearman correlation of residual variance between individuals
+within each cell type. High concordance supports reliable estimation.
+
+```{r repro_cor}
+repro_df <- map_dfr(CELL_TYPES, function(ct) {
+  sub_wide <- res_var_wide[, grepl(ct, colnames(res_var_wide)), drop = FALSE]
+  if (ncol(sub_wide) < 2) return(NULL)
+  inds <- INDIVIDUALS[INDIVIDUALS %in% sub("_.*", "", colnames(sub_wide))]
+  pairs <- combn(inds, 2, simplify = FALSE)
+  map_dfr(pairs, function(p) {
+    col1 <- paste0(p[1], "_", ct)
+    col2 <- paste0(p[2], "_", ct)
+    if (!all(c(col1, col2) %in% colnames(sub_wide))) return(NULL)
+    ok <- !is.na(sub_wide[[col1]]) & !is.na(sub_wide[[col2]])
+    data.frame(
+      celltype = ct,
+      pair     = paste(p, collapse = " vs "),
+      spearman = cor(sub_wide[[col1]][ok], sub_wide[[col2]][ok], method = "spearman"),
+      n_genes  = sum(ok)
+    )
+  })
+})
+
+repro_df |> arrange(celltype, pair)
+
+pw_indv <- ggplot(repro_df, aes(x = reorder(celltype, spearman), y = spearman, colour = pair)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 4, position = position_dodge(width = 0.5)) +
+  scale_colour_brewer(palette = "Set1") +
+  scale_x_discrete(labels = ct_label) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = NULL, y = expression(paste("Spearman ", rho, " (pairwise across individuals)")),
+       subtitle = "",
+       colour = "Individual pair") +
+  theme_diag +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1),
+        legend.position = "top")
+pw_indv
+#ggplot2::ggsave(filename = paste0(results_path, "reproducibility_indv.pdf"), plot = pw_indv,  device = "pdf", width = 7, height = 5, units = "in")
+```
+
+```{r repro_scatter, fig.width = 11, fig.height = 9}
+# Scatter plots for each cell type: first pair of individuals
+plots <- map(CELL_TYPES, function(ct) {
+  col1 <- paste0("NA19099_", ct)
+  col2 <- paste0("NA19093_", ct)
+  if (!all(c(col1, col2) %in% colnames(res_var_wide))) return(NULL)
+  df_plot <- data.frame(x = res_var_wide[[col1]], y = res_var_wide[[col2]]) |>
+    filter(!is.na(x), !is.na(y))
+  rho <- cor(df_plot$x, df_plot$y, method = "spearman") |> round(3)
+  ggplot(df_plot, aes(x = x, y = y)) +
+    geom_point(alpha = 0.15, size = 0.5) +
+    geom_abline(slope = 1, intercept = 0, colour = "#d73027", linetype = "dashed") +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.3,
+             label = paste0("rho == ", rho), size = 3.5, parse = TRUE) +
+    labs(title = gsub("_", " ", ct),
+         x = "NA19099 residual variance", y = "NA19093 residual variance") +
+    theme_diag
+})
+
+gridExtra::grid.arrange(grobs = Filter(Negate(is.null), plots), ncol = 2)
+```
+
+
+
+# 5. Genes Excluded by Expression Threshold (log mean > -6)
+
+How many genes per cell type are above log mean expression of -6 and would
+be removed by applying this filter.
+
+```{r expr_cutoff_table}
+# CUTOFF and df_ct_avg were defined earlier, right after the data was loaded.
+cutoff_df <- df_ct_avg |>
+  group_by(celltype) |>
+  summarise(
+    n_total    = n(),
+    n_excluded = sum(mean_expr > CUTOFF, na.rm = TRUE),
+    n_retained = sum(mean_expr <= CUTOFF, na.rm = TRUE),
+    pct_excluded = round(100 * n_excluded / n_total, 1),
+    .groups = "drop"
+  ) |>
+  arrange(desc(pct_excluded))
+
+cutoff_df
+```
+
+
+
+
+## 5b. DD Genes Removed at Stricter Expression Cutoffs (Mechanism Project)
+
+How many of the mechanism project's current DD (differentially dispersed)
+genes would be lost if the log-mean-expression cutoff were tightened from
+the pipeline's current `-6` to `-6.5` or `-7`? Uses the same mechanism
+dataset as Section 3b.
+
+**DD definition:** `diploid_lfsr < 0.05` AND `allotetraploid_lfsr < 0.05`
+AND same-sign logFC in both -- confirmed to match the master table's
+pre-computed `dd.recapitulated.same.sign.{celltype}` flag exactly (cross-checked
+against a manual recomputation for 3 cell types: Cardiomyocytes 83/83,
+iPSCs 334/334, Neuron 91/91 genes, zero mismatches), so that flag is used
+directly rather than re-derived.
+
+**Removal rule:** matches the pipeline's own per-sample logic
+(`memento_diploid.py`: a gene is retained only if **all** of its diploid
+species × donor samples have mean expression ≤ the cutoff) -- i.e. a
+currently-DD gene is counted as "removed" at a given cutoff if **any** of
+its diploid samples exceeds that cutoff. Applied to the current DD gene set
+per cell type (from `DD_DE_interspecies_results.csv`), using diploid mean
+expression from `mt_rb_mean_filtered_q_thresholds/q0.2/memento/` (same
+source as Section 3b). As expected, since `-6` is already the pipeline's
+configured cutoff, 0 genes are removed at that value (see table below); the
+`-6.5` and `-7` counts show how many additional DD genes a stricter cutoff
+would remove on top of that.
+
+```{r dd_cutoff_sweep_setup}
+DD_PATH <- "/project/gilad/awchen55/mechanism/data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/DD_DE_interspecies_results.csv"
+DD_SWEEP_CUTOFFS <- c(-6, -6.5, -7)
+
+dd_master <- read.csv(DD_PATH, check.names = FALSE)
+
+recap_cols <- grep("^dd\\.recapitulated\\.same\\.sign\\.", colnames(dd_master), value = TRUE)
+recap_cols <- setdiff(recap_cols, "dd.recapitulated.same.sign.n.celltypes")
+dd_sweep_celltypes <- sub("^dd\\.recapitulated\\.same\\.sign\\.", "", recap_cols)
+
+dd_genes_by_ct <- map(dd_sweep_celltypes, function(ct_dot) {
+  flag <- dd_master[[paste0("dd.recapitulated.same.sign.", ct_dot)]]
+  dd_master$gene[!is.na(flag) & flag == 1]
+})
+names(dd_genes_by_ct) <- dd_sweep_celltypes
+
+cat("Cell types with DD calls:", length(dd_sweep_celltypes), "\n")
+cat("Total unique DD genes across all cell types:", length(unique(unlist(dd_genes_by_ct))), "\n")
+```
+
+```{r dd_cutoff_sweep_compute}
+# Worst-case (max) log mean expression across all diploid samples per gene,
+# per cell type -- mirrors memento_diploid.py's own retention rule.
+max_mean_expr_for_ct <- function(ct_dot) {
+  ct_us <- gsub("\\.", "_", ct_dot)
+  f <- file.path(MECH_DIR, paste0("diploid_memento_mean_", ct_us, ".csv"))
+  if (!file.exists(f)) return(NULL)
+  wide <- read.csv(f, check.names = FALSE)
+  sample_cols <- setdiff(colnames(wide), "gene")
+  tibble(gene = wide$gene, max_mean_expr = apply(wide[sample_cols], 1, max, na.rm = TRUE))
+}
+
+mean_by_ct <- map(dd_sweep_celltypes, max_mean_expr_for_ct)
+names(mean_by_ct) <- dd_sweep_celltypes
+
+dd_cutoff_sweep <- map_dfr(dd_sweep_celltypes, function(ct_dot) {
+  dd_genes <- dd_genes_by_ct[[ct_dot]]
+  mean_tbl <- mean_by_ct[[ct_dot]]
+  if (is.null(mean_tbl) || length(dd_genes) == 0) return(NULL)
+  sub <- mean_tbl |> filter(gene %in% dd_genes)
+  map_dfr(DD_SWEEP_CUTOFFS, function(co) {
+    tibble(celltype = ct_dot, cutoff = co, n_dd_genes = length(dd_genes),
+           n_removed = sum(sub$max_mean_expr > co, na.rm = TRUE))
+  })
+}) |>
+  mutate(pct_removed = round(100 * n_removed / n_dd_genes, 1))
+
+dd_cutoff_sweep |> arrange(cutoff, desc(n_removed)) |> as.data.frame()
+```
+
+```{r dd_cutoff_sweep_unique_total}
+dd_unique_removed <- map_dfr(DD_SWEEP_CUTOFFS, function(co) {
+  removed_union <- map(dd_sweep_celltypes, function(ct_dot) {
+    dd_genes <- dd_genes_by_ct[[ct_dot]]
+    mean_tbl <- mean_by_ct[[ct_dot]]
+    if (is.null(mean_tbl) || length(dd_genes) == 0) return(character(0))
+    (mean_tbl |> filter(gene %in% dd_genes, max_mean_expr > co))$gene
+  }) |> unlist() |> unique()
+  tibble(cutoff = co, n_unique_removed = length(removed_union))
+})
+
+n_unique_dd_total <- length(unique(unlist(dd_genes_by_ct)))
+dd_unique_removed <- dd_unique_removed |>
+  mutate(n_unique_dd_total = n_unique_dd_total,
+         pct_unique_removed = round(100 * n_unique_removed / n_unique_dd_total, 1))
+
+dd_unique_removed |> as.data.frame()
+```
+
+```{r dd_cutoff_sweep_plot, fig.width = 11, fig.height = 6}
+ggplot(dd_cutoff_sweep, aes(x = reorder(celltype, -n_removed), y = n_removed, fill = factor(cutoff))) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("-6" = "#4575b4", "-6.5" = "#fdae61", "-7" = "#d73027"),
+                     name = "Log mean\ncutoff") +
+  scale_x_discrete(labels = ct_label_us) +
+  labs(x = NULL, y = "DD genes removed",
+       subtitle = "Current DD genes (recapitulated, same-sign) with any diploid sample above cutoff") +
+  theme_diag +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1), legend.position = "top")
+```
+
+
+
+# 6. Downsampling Reliability Sweep (Cardiomyocytes)
+
+The sections above look at count-depth dependence using the real
+(uncontrolled) cell counts across existing samples, which is confounded: a
+sample with fewer cells might also just have genuinely different biology.
+Here we run a controlled experiment instead: take Cardiomyocytes (the largest cell type,
+30,423 cells pooled across the 3 individuals), downsample each individual's
+cells to a series of fixed depths (100-5,000 cells, well below and up to the
+main project's ~1,000-cell inclusion threshold), rerun memento with 30
+independent replicate subsamples per depth, and compare each replicate's
+per-gene dispersion estimate back to that individual's full-data (no
+downsampling) reference. This isolates the effect of cell count from
+between-sample biological differences.
+
+```{r ds_reliability_load}
+DOWNSAMPLE_DIR <- "/project/gilad/awchen55/differentialDispersion/analysis/dispersion_diagnostics/data/downsample_reliability_cardiomyocytes"
+DS_DEPTHS      <- c("100", "250", "500", "1000", "2500", "5000")  # finite depths; "full" is the reference
+DS_REPLICATES  <- as.character(0:29)
+
+read_ds_dispersion <- function(depth_label, rep_label, dir = DOWNSAMPLE_DIR) {
+  f <- file.path(dir, paste0("depth_", depth_label), paste0("dispersion_rep", rep_label, ".csv"))
+  if (!file.exists(f)) return(NULL)
+  read.csv(f, check.names = FALSE) |>
+    pivot_longer(-gene, names_to = "sample", values_to = "dispersion") |>
+    mutate(individual = sub("_.*", "", sample),
+           depth      = depth_label,
+           replicate  = rep_label) |>
+    select(gene, individual, depth, replicate, dispersion)
+}
+
+ds_full <- read_ds_dispersion("full", "0") |>
+  select(gene, individual, dispersion_full = dispersion)
+
+ds_long <- purrr::map_dfr(DS_DEPTHS, function(d) {
+  purrr::map_dfr(DS_REPLICATES, function(r) read_ds_dispersion(d, r))
+})
+
+ds_joined <- ds_long |>
+  inner_join(ds_full, by = c("gene", "individual")) |>
+  filter(!is.na(dispersion), !is.na(dispersion_full))
+
+cat("Full-data reference (per individual, no downsampling):", nrow(ds_full), "gene x individual rows\n")
+cat("Downsampled rows loaded:", nrow(ds_long), "across", length(DS_DEPTHS), "depths x",
+    length(DS_REPLICATES), "replicates\n")
+cat("Joined to reference:", nrow(ds_joined), "rows\n")
+```
+
+## Reliability vs. depth
+
+```{r ds_reliability_cor, fig.width = 9, fig.height = 5.5}
+ds_reliability <- ds_joined |>
+  group_by(depth, replicate, individual) |>
+  summarise(spearman = cor(dispersion, dispersion_full, method = "spearman", use = "complete.obs"),
+            n_genes = n(), .groups = "drop") |>
+  mutate(depth_num = as.numeric(depth))
+
+ds_reliability_summary <- ds_reliability |>
+  group_by(depth_num, individual) |>
+  summarise(mean_spearman = mean(spearman), sd_spearman = sd(spearman), .groups = "drop")
+
+downsamp_plot <- ggplot() +
+  geom_point(data = ds_reliability, aes(x = depth_num, y = spearman, colour = individual),
+             alpha = 0.35, size = 1.8) +
+  geom_ribbon(data = ds_reliability_summary,
+              aes(x = depth_num, ymin = mean_spearman - sd_spearman, ymax = mean_spearman + sd_spearman,
+                  fill = individual), alpha = 0.15, colour = NA) +
+  geom_line(data = ds_reliability_summary, aes(x = depth_num, y = mean_spearman, colour = individual),
+            linewidth = 1) +
+  ggrepel::geom_text_repel(data = ds_reliability_summary,
+                            aes(x = depth_num, y = mean_spearman, colour = individual,
+                                label = round(mean_spearman, 2)),
+                            size = 3, show.legend = FALSE, seed = 1) +
+  scale_x_log10(breaks = as.numeric(DS_DEPTHS)) +
+  scale_colour_brewer(palette = "Set1") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = "Downsample depth (cells per individual, log scale)",
+       y = expression(paste("Spearman ", rho, " vs. full-data dispersion")),
+       subtitle = "",
+       colour = NULL, fill = NULL) +
+  theme_diag +
+  theme(legend.position = "top",
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 10),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12))
+downsamp_plot
+# ggplot2::ggsave(filename = paste0(results_path, "downsampling_test.pdf"), plot = downsamp_plot,  device = "pdf", width = 7, height = 5, units = "in")
+```
+
+
+
+
+
