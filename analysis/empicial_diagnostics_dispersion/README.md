@@ -6,7 +6,10 @@ The purpose of this study is to further characterize **total variability** and *
 
 ## `dispersion_diagnostics.Rmd`
 
-Two datasets are used throughout: - **cHDC cardiac pilot** (`/project/gilad/brendan/dispersion/pilot/cHDC_data/...`): 6 cell types x 3 individuals (NA19099, NA19093, NA18522). Used for most sections. - **mechanism project** diploid (human/chimp) + allotetraploid memento output (`data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/`): used only in the sections that say so explicitly (3b, 5b).
+Two datasets are used throughout:
+
+- **cHDC cardiac pilot** (`/project/gilad/brendan/dispersion/pilot/cHDC_data/...`): 6 cell types x 3 individuals (NA19099, NA19093, NA18522). Used for most sections.
+- **mechanism project** diploid (human/chimp) + allotetraploid memento output (`data/dd_de_results/mt_rb_mean_filtered_q_thresholds/q0.2/`): used only in the sections that say so explicitly (3b, 5b).
 
 Three filters are used throughout wherever gene-level filtering is applied: mitochondrial/ribosomal gene removal, a log-mean-expression cutoff of -6, and (for the mechanism-project sections) a minimum of 100 cells per donor x cell-type group.
 
@@ -20,14 +23,27 @@ $$\hat{\mu}_g = \frac{1}{n_{cells}} \sum_c \frac{Y_{cg}}{N_c \, q}$$
 
 $$\hat{\sigma}_g^2 = \frac{1}{n_{cells}} \sum_c \frac{Y_{cg}^2 - Y_{cg}(1 - q)}{N_c^2 \, q^2} - \hat{\mu}_g^2$$
 
-where, for gene $g$: $Y_{cg}$ is the observed (sequenced) UMI count for gene $g$ in cell $c$; $N_c$ is the total UMI count of cell $c$; $q$ is the capture efficiency (the assumed probability a true transcript is captured and sequenced -- `memento_q` in the pipeline config, the same value for every cell in a run); $n_{cells}$ is the number of cells in the group being estimated (e.g. one species x donor x cell-type sample); $\hat{\mu}_g$ and $\hat{\sigma}_g^2$ are the resulting mean and variance estimates. The $Y_{cg}(1-q)$ term corrects the raw second moment for the extra sampling variance introduced purely by imperfect capture, so $\hat{\sigma}_g^2$ isn't a capture-noise-inflated estimate of the gene's true variance. (Memento's actual code, `_hyper_1d_relative`, computes an algebraically equivalent quantity in *relative* units -- without the $q$/$q^2$ divisions -- which is an exact constant rescaling that leaves everything below unchanged; see the Rmd for the derivation.)
+where, for gene $g$:
+
+- $Y_{cg}$ -- the observed (sequenced) UMI count for gene $g$ in cell $c$.
+- $N_c$ -- the total UMI count of cell $c$.
+- $q$ -- the capture efficiency: the assumed probability a true transcript is captured and sequenced (`memento_q` in the pipeline config, the same value for every cell in a run).
+- $n_{cells}$ -- the number of cells in the group being estimated (e.g. one species x donor x cell-type sample).
+- $\hat{\mu}_g$ and $\hat{\sigma}_g^2$ -- the resulting mean and variance estimates.
+
+The $Y_{cg}(1-q)$ term corrects the raw second moment for the extra sampling variance introduced purely by imperfect capture, so $\hat{\sigma}_g^2$ isn't a capture-noise-inflated estimate of the gene's true variance.
+
+Memento's actual code (`_hyper_1d_relative`) computes an algebraically equivalent quantity in *relative* units -- without the $q$ / $q^2$ divisions -- which is an exact constant rescaling that leaves everything below unchanged; see the Rmd for the derivation.
 
 **Total variability vs. dispersion.** Three quantities per gene:
 
 -   **Total variability**, $V = \hat{\sigma}_g^2$ -- the gene's raw, mean-uncorrected variance (Memento's internal second moment).
 
--   **Mean component of variance**, $E = \exp(\text{fitted\_trend}(\log(\hat{\mu}_g)))$ -- the variance this gene would have if it behaved exactly like a typical gene at its expression level. Across all genes in a sample, memento fits a mean-variance trend, $\log(V) \sim
-    \text{poly}(\log(\hat{\mu}_g), \text{degree}=2)$ (`_fit_mv_regressor`), and $\log(E)$ is that trend's fitted value at gene $g$'s mean -- the mean-driven baseline that the gene's actual variance gets compared against.
+-   **Mean component of variance**, $E$ -- the variance this gene would have if it behaved exactly like a typical gene at its expression level. Across all genes in a sample, memento fits a mean-variance trend:
+
+    $$\log(V) \sim \text{poly}(\log(\hat{\mu}_g), \text{degree}=2)$$
+
+    ($\log(E)$ is that trend's fitted value at gene $g$'s mean, computed by `_fit_mv_regressor`) -- the mean-driven baseline that the gene's actual variance gets compared against.
 
 -   **Dispersion** -- simply the log-ratio of the two above:
 
@@ -48,7 +64,7 @@ Repeats the mean-dependence check restricted to genes passing the -6 log-mean cu
 
 ### 3b. Same Diagnostic, Mechanism Project
 
-Repeats the mean-dependence LOESS diagnostic on the mechanism project's human/chimp diploid and allotetraploid data instead of the cHDC pilot data, including the 100-cell-per-donor filter and why it's needed (a low-cell- count numerical artifact, also documented in `q_threshold_sensitivity.Rmd` Section 8b).
+Repeats the mean-dependence LOESS diagnostic on the mechanism project's human/chimp diploid and allotetraploid data instead of the cHDC pilot data, including the 100-cell-per-donor filter and why it's needed (a low-cell-count numerical artifact, also documented in `q_threshold_sensitivity.Rmd` Section 8b).
 
 ### 4. Reproducibility Across Individuals
 
