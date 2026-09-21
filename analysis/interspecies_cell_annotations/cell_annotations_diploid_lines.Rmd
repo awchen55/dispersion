@@ -1,0 +1,809 @@
+---
+title: "Diploid Cell Type Annotation"
+output: html_notebook
+date: "2026-05-01"
+description: >
+  Assigns cell type labels to the integrated diploid human/chimp Seurat
+  object (input from Kenneth's SeuratData pipeline) using CelliD, remaps
+  fine-grained reference categories to the 20 broad cell types used
+  throughout the DD/DE analysis, and produces per-cell-type Seurat/AnnData
+  exports plus reference UMAP panels (also used to project the
+  allotetraploid data into the same coordinate space).
+---
+
+## Overview
+
+Assigns cell type labels to all cells in the integrated diploid human/chimp
+Seurat object using **CelliD** (MCA embedding + hypergeometric enrichment test).
+
+Reference gene signatures are drawn from three sources:
+- **FCA** (Fly Cell Atlas / Human Cell Atlas via Wenhe): broad cell type markers
+- **Linnarsson brain atlas**: neuronal sub-types
+- **CM dataset (Gilad lab)**: cardiomyocyte / mesoderm lineages
+
+Because CelliD is memory-intensive, the diploid object is split into 5 chunks
+and annotated in parallel. Labels are then remapped from fine-grained reference
+categories to the 20 broad cell types used in the DD/DE analysis.
+
+**Outputs:**
+- `diploid_cell_annotations.csv` — per-cell barcode + celltype label
+- `diploid_metadata.csv` — full Seurat metadata joined with cell type labels
+- Per-cell-type Seurat objects and AnnData exports for downstream analyses
+
+---
+
+## Load Packages
+
+`CelliD` is a Bioconductor package (`BiocManager::install("CelliD")`), not
+CRAN; everything else here is CRAN.
+
+```{r load-packages, warning=FALSE, message=FALSE}
+library(Seurat)
+library(SeuratObject)
+library(ggplot2)
+library(dplyr)
+library(CelliD)
+library(stringr)
+```
+
+---
+
+## Step 1: Split Integrated Object into Chunks
+
+The integrated diploid object is large (~hundreds of thousands of cells).
+Splitting into 5 equal chunks allows CelliD to run per chunk without running
+out of memory.
+
+```{r split-into-chunks}
+obj <- readRDS("/project/gilad/kenneth/scale_project/SeuratData/combined_1kFeatures_integrated.rds")
+
+all_cells <- colnames(obj)
+n_cells   <- length(all_cells)
+
+# Assign cells to 5 groups deterministically then split
+set.seed(1)
+group_id    <- rep(1:5, length.out = n_cells)
+cell_groups <- split(all_cells, group_id)
+
+obj_list <- lapply(cell_groups, function(cells_use) subset(obj, cells = cells_use))
+sapply(obj_list, ncol)
+
+outdir <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/"
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+for (i in seq_along(obj_list)) {
+  saveRDS(obj_list[[i]],
+          file = paste0(outdir, "combined_1kFeatures_integrated_chunk", i, ".rds"))
+}
+```
+
+---
+
+## Step 2: Load Cell Type Reference Signatures
+
+Three signature sets are combined into a single list for CelliD:
+- **FCA** (Cao et al.): broad cell type markers, with Linnarsson brain subtypes
+  substituted for the brain cell types
+- **Linnarsson brain atlas**: more granular neuronal categories
+- **CM / mesoderm signatures** (Gilad lab, Reem): cardiac lineage markers
+
+Cell cycle genes and non-protein-coding genes are excluded from all signatures.
+
+```{r load-reference-signatures}
+# Brain and eye cell types present in FCA that we replace with other atlases
+brain_fca <- c("Purkinje neurons", "Inhibitory neurons", "Astrocytes",
+               "Granule neurons", "Oligodendrocytes", "Inhibitory interneurons",
+               "Microglia", "Limbic system neurons", "Excitatory neurons",
+               "Unipolar brush cells")
+eye_fca   <- c("Ganglion cells", "Amacrine cells", "Retinal progenitors and Muller glia",
+               "Photoreceptor cells", "Bipolar cells", "Horizontal cells",
+               "Retinal pigment cells", "Lens fibre cells")
+
+# FCA signatures (Cao et al., Human Cell Atlas)
+fca_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/train_test/Cao_FCA_1Kcell_train_sce_250_signature_common_20iterate_cut500reads_noCTRiboMT.rds")
+
+# Add iPSC markers manually
+fca_signatures[["iPSCs"]] <- c("SOX2", "POU5F1", "NANOG", "NODAL", "ZFP42",
+                                "DNMT3B", "UTF1", "LCK", "DPPA2", "IDO1",
+                                "DPPA5", "LEFTY1", "ESRG", "CNMD", "SFRP2",
+                                "THY1", "USP44", "VSNL1", "SPP1", "KLF4",
+                                "GDF3", "L1TD1", "VRTN", "ZSCAN10")
+
+# Linnarsson brain atlas — replaces FCA brain entries
+linn_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/human_brain/brain_signature_reiterated_1000_Celltype_TopLevelCluster_noRiboCCMT.rds")
+
+# Cardiac / mesoderm markers from Gilad lab
+CM_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/CM_Reem/CM_signature_reiterated_1000_noRiboCCMT.rds")
+CM_signatures <- CM_signatures[2:4]
+names(CM_signatures) <- c("Early mesoderm cells", "Cardiac mesoderm cells", "Cardiac progenitor cells")
+
+# Combine: FCA (minus brain) + Linnarsson brain + CM
+fca_signatures <- c(
+  fca_signatures[!names(fca_signatures) %in% brain_fca],
+  linn_signatures,
+  CM_signatures
+)
+
+# Remove cell cycle genes and keep only protein-coding genes
+fca_signatures <- lapply(fca_signatures, function(genes) {
+  genes[!genes %in% unlist(cc.genes.updated.2019) & genes %in% HgProteinCodingGenes]
+})
+```
+
+---
+
+## Step 3: Run CelliD Per Chunk
+
+For each chunk:
+1. Filter to protein-coding genes expressed in >5 cells
+2. Compute highly variable genes (HVG), remove MT / ribosomal / cell cycle genes
+3. Run MCA (Multiple Correspondence Analysis) embedding (50 dimensions)
+4. Score each cell against all reference signatures via hypergeometric test
+5. Assign the highest-scoring label (if -log10 p-value ≥ 2, i.e. p ≤ 0.01)
+
+```{r run-cellid-per-chunk}
+data_inputs <- paste0("combined_1kFeatures_integrated_chunk", 1:5, ".rds")
+outdir      <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/"
+all_cellid_orig <- c()
+
+for (di in data_inputs) {
+  obj <- readRDS(paste0(outdir, di))
+
+  DefaultAssay(obj) <- "RNA"
+  obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+  # Keep protein-coding genes only
+  counts_mat <- LayerData(obj, assay = "RNA", layer = "counts")
+  genes_use  <- intersect(rownames(counts_mat), HgProteinCodingGenes)
+  obj        <- subset(obj, features = genes_use)
+
+  # Keep genes expressed in >5 cells
+  counts_mat <- LayerData(obj, assay = "RNA", layer = "counts")
+  gene_keep  <- rownames(counts_mat)[Matrix::rowSums(counts_mat > 0) > 5]
+  obj        <- subset(obj, features = gene_keep)
+
+  # HVG — exclude MT, ribosomal, and cell cycle genes
+  hvg <- VariableFeatures(FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000))
+  hvg <- hvg[!grepl("^RPL|^RPS|^MT-", hvg) & !hvg %in% unlist(cc.genes.updated.2019)]
+
+  # Feature set = signature genes ∪ HVG (intersected with genes in object)
+  obj_hvg <- c(unlist(fca_signatures), hvg) %>% unique() %>% intersect(rownames(obj))
+  obj     <- ScaleData(obj, features = obj_hvg)
+
+  print(paste("Running MCA on", di))
+  obj <- RunMCA(obj, nmcs = 50, assay = "RNA", slot = "data", features = obj_hvg)
+
+  # Hypergeometric enrichment test: returns -log10(corrected p-value) per cell x cell type
+  cellid_enrichments <- RunCellHGT(obj, pathways = fca_signatures, dims = 1:50, n.features = 300)
+
+  # Assign label with highest enrichment; mark as "unassigned" if max < 2 (-log10 p > 0.01)
+  cellid_labels <- rownames(cellid_enrichments)[apply(cellid_enrichments, 2, which.max)]
+  cellid_labels <- ifelse(apply(cellid_enrichments, 2, max) >= 2, cellid_labels, "unassigned")
+
+  cellid_orig <- as_tibble(cellid_labels, rownames = "cell_barcode") %>%
+    dplyr::select(cell_barcode, celltype = value)
+
+  # Strip trailing cluster numbers appended by Linnarsson atlas (e.g. "Radial glia 3" → "Radial glia")
+  cellid_orig$celltype <- sub("\\s*\\d+$", "", cellid_orig$celltype)
+
+  all_cellid_orig <- rbind(all_cellid_orig, cellid_orig)
+}
+```
+
+---
+
+## Step 4: Remap Fine-Grained Labels to Broad Cell Types
+
+Reference atlases contain more granular categories than we use. Remap to the
+20 broad cell types used across all downstream DD/DE analyses.
+
+```{r remap-celltype-labels}
+all_cellid_orig_merged <- all_cellid_orig %>%
+  mutate(celltype = replace(celltype, celltype == "Visceral neurons",             "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Chromaffin cells",             "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Sympathoblasts",               "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Schwann cells",                "ENS glia")) %>%
+  mutate(celltype = replace(celltype, celltype == "Ureteric bud cells",           "Metanephric cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Bipolar cells",                "Photoreceptor cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Thymocytes",                   "Lymphoid cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Mesothelial cells",            "Epicardial fat cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Amacrine cells",               "Horizontal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Ganglion cells",               "Horizontal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Lymphatic endothelial cells",  "Vascular endothelial cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Mesangial cells",              "Stromal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Fibroblast",                   "Stromal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Parietal and chief cells",     "Goblet cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Cardiac progenitor cells",     "Cardiomyocytes")) %>%
+  mutate(celltype = replace(celltype, celltype == "Horizontal cells",             "Retinal neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Photoreceptor cells",          "Retinal neurons"))
+
+outpath <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+write.csv(all_cellid_orig_merged,
+          paste0(outpath, "diploid_cell_annotations.csv"),
+          row.names = FALSE)
+```
+
+---
+
+## Step 5: Save Full Metadata
+
+Join cell type labels onto full Seurat metadata and save.
+
+```{r save-full-metadata}
+seurat_data <- readRDS('/project/gilad/kenneth/scale_project/SeuratData/combined_1kFeatures_integrated.rds')
+path        <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+cell_annotations_diploid <- read.csv(paste0(path, 'diploid_cell_annotations.csv'))
+
+metadata <- seurat_data@meta.data %>%
+  tibble::rownames_to_column("cell_barcode") %>%
+  dplyr::left_join(cell_annotations_diploid, by = "cell_barcode")
+
+write.csv(metadata, paste0(path, "diploid_metadata.csv"), row.names = FALSE)
+```
+
+---
+
+## Step 6: QC — Cell Counts by Cell Type and Species
+
+```{r load-annotations-for-qc}
+path <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+cell_annotations_diploid <- read.csv(paste0(path, 'diploid_cell_annotations.csv'))
+metadata                 <- read.csv(paste0(path, "diploid_metadata.csv"))
+```
+
+All cell types — total counts by species.
+
+```{r plot-celltype-counts-by-species}
+plot_df <- cell_annotations_diploid %>%
+  mutate(
+    species = case_when(
+      str_starts(cell_barcode, "chimp") ~ "Chimpanzee",
+      str_starts(cell_barcode, "human") ~ "Human",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(species)) %>%
+  count(celltype, species, name = "cell_count") %>%
+  group_by(celltype) %>%
+  mutate(total_cells = sum(cell_count)) %>%
+  ungroup() %>%
+  mutate(
+    celltype = reorder(celltype, -total_cells),
+    species  = factor(species, levels = c("Human", "Chimpanzee"))
+  )
+
+ggplot(plot_df, aes(x = celltype, y = cell_count, fill = species)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = cell_count), position = position_dodge(width = 0.8),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Human" = "#D55E00", "Chimpanzee" = "#0072B2")) +
+  labs(x = "", y = "Number of Cells", fill = "") +
+  theme_classic() +
+  theme(
+    axis.text.x       = element_text(angle = 45, hjust = 1),
+    panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    legend.position   = c(0.9, 0.9),
+    legend.background = element_blank(),
+    legend.key        = element_blank()
+  ) +
+  expand_limits(y = max(plot_df$cell_count) * 1.1)
+```
+
+Cell types with ≥ 1,000 cells in both human and chimp (used in DD/DE analysis).
+
+```{r plot-celltype-counts-filtered}
+plot_df <- cell_annotations_diploid %>%
+  dplyr::mutate(
+    species = dplyr::case_when(
+      stringr::str_starts(cell_barcode, "chimp") ~ "Chimpanzee",
+      stringr::str_starts(cell_barcode, "human") ~ "Human",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(!is.na(species), celltype != "unassigned") %>%
+  dplyr::count(celltype, species, name = "cell_count") %>%
+  dplyr::group_by(celltype) %>%
+  dplyr::filter(all(cell_count >= 1000)) %>%
+  dplyr::mutate(min_cells = min(cell_count)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    celltype = reorder(celltype, -min_cells),
+    species  = factor(species, levels = c("Human", "Chimpanzee"))
+  )
+
+ggplot(plot_df, aes(x = celltype, y = cell_count, fill = species)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = cell_count), position = position_dodge(width = 0.8),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Human" = "#D55E00", "Chimpanzee" = "#0072B2")) +
+  labs(x = "", y = "Number of Cells", fill = "") +
+  theme_classic() +
+  theme(
+    axis.text.x       = element_text(angle = 45, hjust = 1),
+    panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    legend.position   = c(0.9, 0.9),
+    legend.background = element_blank(),
+    legend.key        = element_blank()
+  ) +
+  expand_limits(y = max(plot_df$cell_count) * 1.1)
+```
+
+Cell type proportions by individual donor (human and chimp separately).
+
+```{r celltype-proportions-by-donor}
+keep_celltypes <- metadata %>%
+  filter(!is.na(species), !is.na(celltype), !is.na(donor_id),
+         tolower(celltype) != "unassigned", species %in% c("human", "chimp")) %>%
+  count(celltype, species) %>%
+  tidyr::complete(celltype, species, fill = list(n = 0)) %>%
+  group_by(celltype) %>%
+  filter(all(n >= 1000)) %>%
+  pull(celltype) %>%
+  unique()
+
+shared_celltype_order <- metadata %>%
+  dplyr::filter(!is.na(species), !is.na(celltype), !is.na(donor_id),
+                tolower(celltype) != "unassigned", species %in% c("human", "chimp"),
+                celltype %in% keep_celltypes) %>%
+  dplyr::count(celltype, name = "total_cells_all_species") %>%
+  dplyr::arrange(dplyr::desc(total_cells_all_species)) %>%
+  dplyr::pull(celltype)
+
+#' Plot per-donor cell type composition for one species.
+#'
+#' Horizontal stacked bar chart showing, for a given species, what fraction
+#' of each cell type's cells come from each donor -- used as a QC check that
+#' no cell type is dominated by a single individual before it's used
+#' downstream in DD/DE analysis.
+#'
+#' @param metadata_df Data frame (or tibble) of per-cell metadata with
+#'   columns `species`, `celltype`, `donor_id`.
+#' @param species_name Value of `species` to filter to (e.g. "human" or
+#'   "chimp").
+#' @param title Plot title.
+#' @param celltype_order Character vector giving the y-axis cell type order
+#'   (top to bottom); typically `shared_celltype_order` computed above.
+#' @return A ggplot object.
+make_species_prop_plot <- function(metadata_df, species_name, title, celltype_order) {
+  plot_df <- metadata_df %>%
+    dplyr::filter(!is.na(species), !is.na(celltype), !is.na(donor_id),
+                  tolower(celltype) != "unassigned",
+                  species == species_name, celltype %in% celltype_order) %>%
+    dplyr::count(celltype, donor_id, name = "cell_count") %>%
+    dplyr::group_by(celltype) %>%
+    dplyr::mutate(total_cells = sum(cell_count), proportion = cell_count / sum(cell_count)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(celltype = factor(celltype, levels = rev(celltype_order)))
+
+  ggplot(plot_df, aes(x = proportion, y = celltype, fill = donor_id)) +
+    geom_col(width = 0.8) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1), expand = c(0, 0)) +
+    labs(title = title, x = "Proportion of Cells", y = "", fill = "Individual") +
+    theme_classic() +
+    theme(
+      panel.border  = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      axis.text.y   = element_text(size = 10),
+      legend.position = "right"
+    )
+}
+
+p_human <- make_species_prop_plot(metadata, "human", "Human",      shared_celltype_order)
+p_chimp <- make_species_prop_plot(metadata, "chimp", "Chimpanzee", shared_celltype_order)
+
+p_human
+p_chimp
+
+results_path <- '/project/gilad/awchen55/mechanism/results/cell_annotations/'
+ggsave(paste0(results_path, "human_diploid_celltype_prop.png"), plot = p_human, width = 7, height = 5, dpi = 300)
+ggsave(paste0(results_path, "chimp_diploid_celltype_prop.png"), plot = p_chimp, width = 7, height = 5, dpi = 300)
+```
+
+---
+
+## Step 7: Prepare Seurat Objects with Annotations
+
+Add cell type labels to the full Seurat object and save annotated versions.
+
+```{r annotate-full-seurat-object}
+seurat_data <- readRDS('/project/gilad/kenneth/scale_project/SeuratData/combined_1kFeatures_integrated.rds')
+
+seurat_data@meta.data <- seurat_data@meta.data %>%
+  tibble::rownames_to_column("cell_barcode") %>%
+  dplyr::left_join(cell_annotations_diploid, by = "cell_barcode") %>%
+  tibble::column_to_rownames("cell_barcode")
+
+outdir <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/"
+saveRDS(seurat_data, file = paste0(outdir, "combined_1kFeatures_integrated_annotated.rds"))
+```
+
+Add annotations to each chunk as well.
+
+```{r annotate-chunks}
+outdir <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/"
+path   <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+cell_annotations_diploid <- read.csv(paste0(path, 'diploid_cell_annotations.csv'))
+
+for (i in 1:5) {
+  seurat_sub <- readRDS(paste0(outdir, "combined_1kFeatures_integrated_chunk", i, ".rds"))
+
+  seurat_sub@meta.data <- seurat_sub@meta.data %>%
+    tibble::rownames_to_column("cell_barcode") %>%
+    dplyr::left_join(cell_annotations_diploid, by = "cell_barcode") %>%
+    tibble::column_to_rownames("cell_barcode")
+
+  saveRDS(seurat_sub, file = paste0(outdir, "combined_1kFeatures_integrated_annotated_chunk", i, ".rds"))
+}
+```
+
+---
+
+## Step 8: Split by Cell Type
+
+Split the annotated object into one Seurat object per cell type. Only cell types
+with ≥ 1,000 cells in both human and chimp are kept.
+
+```{r example-split-by-celltype, eval=FALSE}
+outdir     <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/"
+seurat_data <- readRDS(paste0(outdir, "combined_1kFeatures_integrated_annotated.rds"))
+
+seurat_list <- SplitObject(seurat_data, split.by = "celltype")
+
+ct_outdir <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/celltype/"
+for (ct in names(seurat_list)) {
+  saveRDS(seurat_list[[ct]],
+          file = file.path(ct_outdir, paste0("combined_1kFeatures_integrated_", ct, ".rds")))
+}
+```
+
+Determine which cell types meet the ≥ 1,000 cell threshold in both species.
+
+```{r example-determine-celltypes-to-keep, eval=FALSE}
+celltypes_keep <- cell_annotations_diploid %>%
+  mutate(
+    species = case_when(
+      str_starts(cell_barcode, "chimp") ~ "Chimpanzee",
+      str_starts(cell_barcode, "human") ~ "Human",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(species), celltype != "unassigned") %>%
+  count(celltype, species, name = "cell_count") %>%
+  group_by(celltype) %>%
+  filter(all(cell_count >= 1000)) %>%
+  ungroup() %>%
+  distinct(celltype) %>%
+  pull(celltype)
+```
+
+---
+
+## Step 9: Export to AnnData Format
+
+Export each cell type's counts, metadata, and gene/cell lists as flat files
+for conversion to AnnData in Python.
+
+```{r export-to-anndata}
+library(Matrix)
+
+outdir      <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/celltype/"
+export_base <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/anndata_exports/"
+
+celltypes_keep_underscore <- gsub(" ", "_", celltypes_keep)
+
+for (ct in celltypes_keep_underscore) {
+  message("Exporting ", ct)
+
+  seurat_sub <- readRDS(paste0(outdir, "combined_1kFeatures_integrated_", ct, ".rds"))
+  DefaultAssay(seurat_sub) <- "RNA"
+  seurat_sub <- JoinLayers(seurat_sub, assay = "RNA")
+
+  chunk_dir <- paste0(export_base, ct, "/")
+  dir.create(chunk_dir, showWarnings = FALSE, recursive = TRUE)
+
+  # Raw counts
+  counts_mat <- as(seurat_sub[["RNA"]]$counts, "dgCMatrix")
+  Matrix::writeMM(counts_mat, file = paste0(chunk_dir, "counts.mtx"))
+
+  # Normalised data (if present)
+  data_mat <- tryCatch(seurat_sub[["RNA"]]$data, error = function(e) NULL)
+  if (!is.null(data_mat)) {
+    Matrix::writeMM(as(data_mat, "dgCMatrix"), file = paste0(chunk_dir, "data.mtx"))
+  }
+
+  # Cell metadata
+  meta <- seurat_sub@meta.data
+  meta$cell_barcode <- rownames(meta)
+  write.csv(meta, file = paste0(chunk_dir, "metadata.csv"), row.names = FALSE, quote = TRUE)
+
+  # Gene and cell name lists
+  write.csv(data.frame(gene = rownames(counts_mat)),
+            file = paste0(chunk_dir, "genes.csv"), row.names = FALSE, quote = FALSE)
+  write.csv(data.frame(cell_barcode = colnames(counts_mat)),
+            file = paste0(chunk_dir, "cells.csv"), row.names = FALSE, quote = FALSE)
+
+  # Dimensionality reductions if present
+  for (red in c("pca", "umap", "tsne")) {
+    if (red %in% names(seurat_sub@reductions)) {
+      red_df <- as.data.frame(Embeddings(seurat_sub, reduction = red))
+      red_df$cell_barcode <- rownames(red_df)
+      write.csv(red_df, file = paste0(chunk_dir, red, ".csv"), row.names = FALSE, quote = TRUE)
+    }
+  }
+
+  rm(seurat_sub, counts_mat, data_mat, meta)
+  gc()
+}
+```
+
+---
+
+## Step 10: Verify AnnData Exports
+
+Check that cell counts in exported `.mtx` files match annotation table.
+
+```{r verify-anndata-exports}
+library(Matrix)
+
+base_dir <- "/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/anndata_exports/"
+
+expected_counts <- as.data.frame(table(cell_annotations_diploid$celltype)) %>%
+  dplyr::rename(celltype = Var1, expected_ncells = Freq) %>%
+  dplyr::mutate(expected_ncells = as.integer(expected_ncells))
+
+celltype_dirs <- list.dirs(base_dir, full.names = TRUE, recursive = FALSE)
+
+results_df <- bind_rows(lapply(celltype_dirs, function(ct_dir) {
+  celltype_name <- basename(ct_dir)
+  mtx_file      <- file.path(ct_dir, "counts.mtx")
+
+  if (!file.exists(mtx_file)) {
+    return(data.frame(celltype = celltype_name, n_rows = NA_integer_, n_cols = NA_integer_,
+                      expected_ncells = expected_counts$expected_ncells[match(celltype_name, expected_counts$celltype)],
+                      match = NA, stringsAsFactors = FALSE))
+  }
+
+  mat      <- readMM(mtx_file)
+  expected <- expected_counts$expected_ncells[match(celltype_name, expected_counts$celltype)]
+
+  data.frame(celltype = celltype_name, n_rows = nrow(mat), n_cols = ncol(mat),
+             expected_ncells = expected, match = !is.na(expected) & (ncol(mat) == expected),
+             stringsAsFactors = FALSE)
+}))
+
+results_df
+
+# Cell types where export count does not match annotation count
+results_df %>% filter(is.na(match) | match == FALSE) %>% pull(celltype)
+```
+
+---
+
+## Step 11: UMAPs by Cell Type (Filtered Data)
+
+Four UMAPs, all restricted to the same 20 broad cell types used throughout
+the DD/DE analysis (`celltypes_keep` from Step 8, i.e. >= 1,000 cells in
+both human and chimp diploid), all sharing one color-per-celltype palette so
+the same cell type is the same color across panels. `celltype` is coerced to
+a factor with levels locked to exactly these 20 (via `restrict_celltypes()`
+below) so no stray/off-target category (e.g. `unassigned`, rare cell types
+outside the analysis set) can slip into a legend or label:
+
+1. Diploid, human + chimp combined -- **labeled directly on the UMAP**
+2. Diploid, human only -- no cell type labels or legend at all
+3. Diploid, chimp only -- no cell type labels or legend at all
+4. Allotetraploid -- **labeled directly on the UMAP**, same style as (1)
+
+```{r umap-setup-celltypes-and-colors}
+# Exact 20 cell types used throughout the DD/DE analysis (matches
+# celltypes2/celltypes_display in dd_de_interspecies_analysis.Rmd). NOT
+# recomputed here via a >=1000-cells-in-both-species threshold on the
+# current annotations, since that threshold currently also passes 3 extra
+# cell types (Early mesoderm cells, Smooth muscle cells, Stellate cells)
+# that aren't part of the actual downstream analysis set.
+celltypes_keep <- c(
+  "Bronchiolar and alveolar epithelial cells", "Cardiac mesoderm cells",
+  "Cardiomyocytes", "Ciliated epithelial cells", "ENS glia",
+  "Epicardial fat cells", "Glioblast", "Goblet cells", "Hepatoblasts",
+  "Intestinal epithelial cells", "Metanephric cells", "Neuroblast",
+  "Neuron", "Neuronal IPC", "Radial glia", "Retinal neurons",
+  "Squamous epithelial cells", "Stromal cells",
+  "Vascular endothelial cells", "iPSCs"
+)
+
+celltype_colors <- setNames(
+  scales::hue_pal()(length(celltypes_keep)),
+  sort(celltypes_keep)
+)
+
+# Locks `celltype` to exactly `celltypes_keep` -- any cell not in this set
+# should already have been dropped by subset(), but forcing the factor
+# levels too guarantees no stray level can appear in a legend/label even if
+# it slips through with 0 cells.
+restrict_celltypes <- function(obj) {
+  obj$celltype <- factor(as.character(obj$celltype), levels = sort(celltypes_keep))
+  obj
+}
+
+umap_outdir <- "/project/gilad/awchen55/mechanism/results/dispersion_paper/main/umaps/"
+
+```
+
+### Diploid UMAPs
+
+```{r fit-diploid-reference-umap}
+# BPCells is needed to load the object's on-disk "sketch" assay, and, as it
+# turns out, some of the RNA assay's own layers too.
+.libPaths(c("/project/gilad/awchen55/Rlibs/R4-4-1", .libPaths()))
+
+seurat_data <- readRDS("/project/gilad/awchen55/mechanism/data/diploid_crossfilt_data/combined_1kFeatures_integrated_annotated.rds")
+
+DefaultAssay(seurat_data) <- "RNA"
+seurat_data[["sketch"]] <- NULL
+seurat_data <- JoinLayers(seurat_data)
+
+seurat_diploid_filt <- subset(seurat_data, subset = celltype %in% celltypes_keep) %>%
+  restrict_celltypes()
+rm(seurat_data)
+gc()
+
+# Seurat v5 sketch-based objects carry a sketch-subsample-only PCA ("pca",
+# fit directly -- has real feature loadings) alongside full-dataset
+# extensions. FindTransferAnchors (used below for the allotetraploid
+# projection) needs reference.reduction to BOTH have real loadings AND
+# cover every cell in the reference. "pca"/"pca.full" don't satisfy both at
+# once -- but "integrated.rpca.full" does: it's the full-dataset extension
+# of this object's own RPCA cross-species integration (see
+# RunUMAP.RNA.integrated.rpca.full in seurat_data@commands), already has
+# real loadings (2000 features) AND covers all cells, and is exactly what
+# the object's original "umap.full" panel was built on -- i.e. it's already
+# batch-corrected across human/chimp. (We first tried fitting a totally
+# fresh, uncorrected PCA here instead of reusing this -- that reintroduced
+# a human-vs-chimp batch effect into cell type cluster proportions that the
+# original integration had removed.) So we just refit UMAP with
+# return.model = TRUE directly on this existing reduction (the original
+# "umap.full" wasn't saved with a model, so it can't be projected onto
+# as-is) -- no fresh PCA needed. The human-only and chimp-only panels below
+# then subset cells out of THIS single fit (never independently refit), and
+# the tetraploid reference-mapping
+# (https://github.com/satijalab/seurat/issues/3864) targets this same fit
+# too -- so all four panels share one consistent, properly-integrated
+# coordinate space.
+ref_pca_name <- "integrated.rpca.full"
+seurat_diploid_filt <- RunUMAP(
+  seurat_diploid_filt, dims = 1:50, reduction = ref_pca_name,
+  reduction.name = "refumap", reduction.key = "refUMAP_",
+  return.model = TRUE
+)
+```
+
+```{r plot-diploid-combined-umap, fig.width=9, fig.height=7}
+p_diploid_combined <- DimPlot(
+  seurat_diploid_filt, reduction = "refumap", group.by = "celltype",
+  cols = celltype_colors, label = FALSE
+) +
+  labs(title = "", x = "UMAP 1", y = "UMAP 2") +
+  NoLegend()
+
+p_diploid_combined_labeled <- LabelClusters(
+  p_diploid_combined, id = "celltype",
+  repel = TRUE, fontface = "bold", size = 3.5
+)
+p_diploid_combined_labeled
+
+ggsave(
+  file.path(umap_outdir, "diploid_combined_umap.pdf"),
+  plot = p_diploid_combined_labeled, width = 9, height = 7
+)
+```
+
+```{r plot-diploid-human-umap, fig.width=9, fig.height=7}
+# Subset out of the single combined fit above -- NOT an independent refit --
+# so this panel's coordinates are a strict subset of the combined UMAP
+# (guarantees the same cell type lands in the same place in every panel).
+seurat_diploid_human <- subset(seurat_diploid_filt, subset = species == "human") %>%
+  restrict_celltypes()
+
+# No cell type labels or legend at all for the human/chimp panels --
+# identification relies on the combined, labeled panel above.
+p_diploid_human <- DimPlot(seurat_diploid_human, reduction = "refumap", group.by = "celltype", cols = celltype_colors) +
+  labs(title = "Diploid (human)", x = "UMAP 1", y = "UMAP 2") +
+  NoLegend()
+p_diploid_human
+
+ggsave(
+  file.path(umap_outdir, "diploid_human_umap.pdf"),
+  plot = p_diploid_human, width = 9, height = 7
+)
+```
+
+```{r plot-diploid-chimp-umap, fig.width=9, fig.height=7}
+seurat_diploid_chimp <- subset(seurat_diploid_filt, subset = species == "chimp") %>%
+  restrict_celltypes()
+
+p_diploid_chimp <- DimPlot(seurat_diploid_chimp, reduction = "refumap", group.by = "celltype", cols = celltype_colors) +
+  labs(title = "Diploid (chimp)", x = "UMAP 1", y = "UMAP 2") +
+  NoLegend()
+p_diploid_chimp
+
+ggsave(
+  file.path(umap_outdir, "diploid_chimp_umap.pdf"),
+  plot = p_diploid_chimp, width = 9, height = 7
+)
+```
+
+### Allotetraploid UMAP
+
+Rather than fitting an independent UMAP for the allotetraploid data (which
+would land in an arbitrary, incomparable coordinate space), we **project**
+it into the same combined-diploid reference UMAP (`seurat_diploid_filt`,
+`refumap`) that the combined/human/chimp panels above all share, via
+Seurat's anchor-based reference mapping (`FindTransferAnchors` + `MapQuery`;
+see https://github.com/satijalab/seurat/issues/3864). Cell type coloring
+still uses the allotetraploid's own CelliD calls (Step 3) -- the projection
+only supplies the x/y placement, not the label.
+
+Each hybrid cell contributes two rows here -- one human-allele and one
+chimp-allele pseudo-observation (`species` column) -- rather than two
+distinct organisms as in the diploid data (same convention used for cell
+counts elsewhere in this document, e.g. Step 6). We show only one species
+(**human**) per physical cell so each cell appears once in the UMAP.
+
+```{r load-tetraploid-for-projection}
+tetraploid_obj <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_combined_variablfeatures_filtered.rds")
+
+DefaultAssay(tetraploid_obj) <- "RNA"
+tetraploid_filt <- subset(tetraploid_obj, subset = celltype %in% celltypes_keep & species == "human") %>%
+  restrict_celltypes()
+rm(tetraploid_obj)
+gc()
+
+tetraploid_filt <- NormalizeData(tetraploid_filt)
+```
+
+```{r map-tetraploid-onto-diploid-umap}
+# FindTransferAnchors parallelizes internally via `future`; with the
+# reference now the full combined (human + chimp) object rather than just
+# human, the per-worker payload exceeds the default 500 MiB `future`
+# transfer limit. Raise it rather than letting the call fail.
+options(future.globals.maxSize = 8000 * 1024^2)
+
+anchors <- FindTransferAnchors(
+  reference = seurat_diploid_filt,
+  query = tetraploid_filt,
+  dims = 1:50,
+  reference.reduction = ref_pca_name
+)
+
+tetraploid_mapped <- MapQuery(
+  anchorset = anchors,
+  reference = seurat_diploid_filt,
+  query = tetraploid_filt,
+  refdata = list(predicted.celltype = "celltype"),
+  reference.reduction = ref_pca_name,
+  reduction.model = "refumap"
+)
+
+# MapQuery's own metadata handling can drop factor levels -- reapply so the
+# palette/legend stay locked to exactly celltypes_keep.
+tetraploid_mapped <- restrict_celltypes(tetraploid_mapped)
+```
+
+```{r plot-allotetraploid-umap, fig.width=9, fig.height=7}
+p_tetraploid <- DimPlot(
+  tetraploid_mapped, reduction = "ref.umap", group.by = "celltype",
+  cols = celltype_colors, label = FALSE
+) +
+  labs(title = "", x = "UMAP 1", y = "UMAP 2") +
+  NoLegend()
+
+p_tetraploid_labeled <- LabelClusters(
+  p_tetraploid, id = "celltype",
+  repel = TRUE, fontface = "bold", size = 3.5
+)
+p_tetraploid_labeled
+
+ggsave(
+  file.path(umap_outdir, "allotetraploid_umap.pdf"),
+  plot = p_tetraploid_labeled, width = 9, height = 7
+)
+```

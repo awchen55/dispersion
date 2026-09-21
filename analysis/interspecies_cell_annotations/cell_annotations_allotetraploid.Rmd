@@ -1,0 +1,639 @@
+---
+title: "Allotetraploid Object Creation and Cell Annotation"
+output: html_notebook
+date: "2026-05-01"
+description: >
+  Builds the allotetraploid Seurat object from per-lane STARsolo outputs
+  (humanized/human/chimp allele-specific alignments from Kenneth's
+  pipeline), annotates cell types with CelliD on the humanized allele, then
+  merges the human and chimp allele counts into one combined,
+  shared-barcode-filtered object used throughout the DD/DE and cis/trans
+  mechanism analyses.
+---
+
+## Overview
+
+Creates and annotates Seurat objects for the **allotetraploid** cell lines.
+The allotetraploid system allows cis vs. trans regulatory dissection: each cell
+contains both human and chimp genomes, and reads are separated by allele of
+origin during alignment.
+
+Three alignment outputs are used per lane:
+- **humanized** — reads assigned to the human allele of a chimped genome (used for CelliD annotation)
+- **human** — reads from the human genome
+- **chimp** — reads from the chimp genome
+
+**Workflow:**
+1. Load humanized STARsolo counts (8 lanes), create BPCells-backed Seurat objects
+2. QC plots; normalize and find variable features
+3. Run CelliD (MCA + hypergeometric test) for cell type annotation on humanized data
+4. Load human and chimp allele objects separately
+5. Find cells present in all three objects (humanized, human, chimp)
+6. Merge human + chimp into a combined object; filter to shared-barcode cells
+7. Save annotated combined object and export per-cell-type AnnData files
+
+**Outputs:**
+- `tetraploid_cell_annotations.csv` — per-cell barcode + cell type label
+- `tetraploid_metadata.csv` — full metadata for filtered combined object
+- `tetraploid_combined_variablfeatures_filtered.rds` — final analysis-ready object
+- Per-cell-type AnnData exports under `data/tetraploid/anndata_exports/`
+
+---
+
+## Load Packages
+
+`BPCells` and `CelliD` are Bioconductor/GitHub packages
+(`BiocManager::install("BPCells")`, `BiocManager::install("CelliD")`), not
+CRAN; everything else here is CRAN.
+
+```{r load-packages, warning=FALSE, message=FALSE}
+require(Seurat)
+require(dplyr)
+require(parallel)
+require(BPCells)
+library(ggplot2)
+library(CelliD)
+library(stringr)
+```
+
+---
+
+## Helper Function: Create Seurat Object from STARsolo Output
+
+Reads count matrices from a list of STARsolo raw output directories, filters to
+cells with > 1,000 features, and merges all lanes into one object with
+BPCells-backed count storage.
+
+```{r create-object-helper}
+#' Build one Seurat object from a set of STARsolo raw-output directories.
+#'
+#' Reads each directory's counts via `ReadMtx`, filters to cells with
+#' > 1,000 detected features, and merges all directories (lanes) into a
+#' single object. Used identically for the humanized, human, and chimp
+#' allele alignments -- only the input directory list and `cell_id` prefix
+#' differ between calls.
+#'
+#' @param counts Character vector of STARsolo raw-output directory paths
+#'   (each containing `matrix.mtx`, `barcodes.tsv`, `features.tsv`), one per
+#'   lane to merge.
+#' @param cell_id String prepended to every cell barcode in this call (with
+#'   a space, per `paste()`'s default separator) before merging -- callers
+#'   in this document pass `""`, i.e. no prefix, and add a species prefix
+#'   separately later via `RenameCells()`.
+#' @return A merged Seurat object (layers joined) with counts in the `RNA`
+#'   assay; a single directory's object is returned as-is if only one lane
+#'   is provided.
+create_object <- function(counts, cell_id) {
+  obj_list <- list()
+  for (i in seq_along(counts)) {
+    obj <- ReadMtx(
+      mtx      = paste0(counts[i], "/matrix.mtx"),
+      cells    = paste0(counts[i], "/barcodes.tsv"),
+      features = paste0(counts[i], "/features.tsv")
+    )
+    colnames(obj) <- paste(cell_id, colnames(obj))
+    obj <- CreateSeuratObject(obj)
+    obj <- subset(obj, subset = nFeature_RNA > 1000)
+    obj_list[[i]] <- obj
+  }
+  if (length(obj_list) > 1) {
+    obj <- merge(obj_list[[1]], obj_list[2:length(obj_list)])
+    obj <- JoinLayers(obj)
+    return(obj)
+  } else {
+    return(obj_list[[1]])
+  }
+}
+```
+
+---
+
+## Step 1: Load Humanized Allotetraploid Data (8 Lanes)
+
+STARsolo outputs are in `.humanized/Solo.out/GeneFull_Ex50pAS/raw`. Counts are
+stored on disk using BPCells to keep memory usage manageable.
+
+```{r load-humanized-data-8-lanes}
+bpcells_base <- '/project/gilad/awchen55/mechanism/data/tetraploid/'
+
+obj_list <- mclapply(1:8, function(i) {
+  lane     <- paste0(i)
+  base_dir <- paste0("/project/gilad/kenneth/scale_project/tetraploid/alignment/",
+                     "Sample-Tetraploid.QSR-", lane, "/Sample-Tetraploid.QSR-", lane,
+                     ".star.align/split_bams/")
+
+  dirs      <- list.dirs(base_dir)
+  this.dirs <- dirs[grep(".humanized/Solo.out/GeneFull_Ex50pAS/raw", dirs, fixed = TRUE)]
+
+  obj <- create_object(this.dirs, "")
+
+  # Write counts to BPCells on-disk format and reopen
+  this.bpcells <- paste0(bpcells_base, "tetraploid_", lane)
+  write_matrix_dir(mat = convert_matrix_type(obj[["RNA"]]$counts, "uint32_t"), dir = this.bpcells)
+  obj[["RNA"]]$counts <- open_matrix_dir(dir = this.bpcells)
+
+  obj$well <- lane
+  obj
+}, mc.cores = 8)
+
+# Merge all 8 lanes into one object
+obj <- merge(obj_list[[1]], obj_list[2:8])
+obj <- JoinLayers(obj)
+saveRDS(obj, paste0(bpcells_base, "tetraploid.rds"))
+```
+
+---
+
+## Step 2: QC — Humanized Object
+
+```{r qc-humanized-nfeature}
+obj_test <- readRDS(paste0("/project/gilad/awchen55/mechanism/data/tetraploid/", "tetraploid.rds"))
+
+VlnPlot(obj_test, "nFeature_RNA", pt.size = 0, group.by = "well", log = TRUE) +
+  geom_hline(yintercept = 1500, linetype = 2)
+```
+
+```{r qc-humanized-percent-mt-rp-malat1}
+obj_test[["percent.mt"]]     <- PercentageFeatureSet(obj_test, pattern = "^MT-")
+obj_test[["percent.rp"]]     <- PercentageFeatureSet(obj_test, pattern = "^RPS|^RPL")
+obj_test[["percent.malat1"]] <- PercentageFeatureSet(obj_test, pattern = "MALAT1")
+
+VlnPlot(obj_test, "percent.mt",     pt.size = 0, group.by = "well")
+VlnPlot(obj_test, "percent.rp",     pt.size = 0, group.by = "well")
+VlnPlot(obj_test, "percent.malat1", pt.size = 0, group.by = "well")
+```
+
+```{r normalize-humanized-and-save}
+# Normalize and find variable features for use in CelliD
+obj_test <- NormalizeData(obj_test)
+obj_test <- FindVariableFeatures(obj_test, nfeatures = 3000)
+saveRDS(obj_test, file = "/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_humanized_variablefeatures.rds")
+saveRDS(obj_test, file = "/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_humanized.rds")
+```
+
+---
+
+## Step 3: Load Cell Type Reference Signatures
+
+Same three-source signature set used for diploid annotation (FCA + Linnarsson
+brain atlas + Gilad lab cardiac signatures). See `cell_annotations_diploid_lines.Rmd`
+for full description.
+
+```{r load-reference-signatures}
+brain_fca <- c("Purkinje neurons", "Inhibitory neurons", "Astrocytes",
+               "Granule neurons", "Oligodendrocytes", "Inhibitory interneurons",
+               "Microglia", "Limbic system neurons", "Excitatory neurons",
+               "Unipolar brush cells")
+
+fca_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/train_test/Cao_FCA_1Kcell_train_sce_250_signature_common_20iterate_cut500reads_noCTRiboMT.rds")
+
+fca_signatures[["iPSCs"]] <- c("SOX2", "POU5F1", "NANOG", "NODAL", "ZFP42",
+                                "DNMT3B", "UTF1", "LCK", "DPPA2", "IDO1",
+                                "DPPA5", "LEFTY1", "ESRG", "CNMD", "SFRP2",
+                                "THY1", "USP44", "VSNL1", "SPP1", "KLF4",
+                                "GDF3", "L1TD1", "VRTN", "ZSCAN10")
+
+linn_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/human_brain/brain_signature_reiterated_1000_Celltype_TopLevelCluster_noRiboCCMT.rds")
+
+CM_signatures <- readRDS("/project2/gilad/wenhe/EB/combined_3_4/data/celltype_annotate/CM_Reem/CM_signature_reiterated_1000_noRiboCCMT.rds")
+CM_signatures <- CM_signatures[2:4]
+names(CM_signatures) <- c("Early mesoderm cells", "Cardiac mesoderm cells", "Cardiac progenitor cells")
+
+fca_signatures <- c(fca_signatures[!names(fca_signatures) %in% brain_fca], linn_signatures, CM_signatures)
+fca_signatures <- lapply(fca_signatures, function(genes) {
+  genes[!genes %in% unlist(cc.genes.updated.2019) & genes %in% HgProteinCodingGenes]
+})
+```
+
+---
+
+## Step 4: Run CelliD on Humanized Data (2 Chunks)
+
+Split into 2 chunks to manage memory during MCA embedding.
+
+```{r split-humanized-into-chunks}
+obj_humanized <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_humanized_variablefeatures.rds")
+
+all_cells  <- colnames(obj_humanized)
+set.seed(1)
+cell_groups <- split(all_cells, rep(1:2, length.out = length(all_cells)))
+
+obj_list <- lapply(cell_groups, function(cells_use) subset(obj_humanized, cells = cells_use))
+sapply(obj_list, ncol)
+
+outdir <- "/project/gilad/awchen55/mechanism/data/tetraploid/"
+for (i in seq_along(obj_list)) {
+  saveRDS(obj_list[[i]],
+          file = paste0(outdir, "tetraploid_humanized_variablefeatures_chunk", i, ".rds"))
+}
+```
+
+```{r run-cellid-per-chunk}
+data_inputs     <- c('tetraploid_humanized_variablefeatures_chunk1.rds',
+                     'tetraploid_humanized_variablefeatures_chunk2.rds')
+outdir          <- "/project/gilad/awchen55/mechanism/data/tetraploid/"
+all_cellid_orig <- c()
+
+for (di in data_inputs) {
+  obj <- readRDS(paste0(outdir, di))
+
+  DefaultAssay(obj) <- "RNA"
+  obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+  # Filter to protein-coding genes expressed in >5 cells
+  counts_mat <- LayerData(obj, assay = "RNA", layer = "counts")
+  genes_use  <- intersect(rownames(counts_mat), HgProteinCodingGenes)
+  obj        <- subset(obj, features = genes_use)
+  counts_mat <- LayerData(obj, assay = "RNA", layer = "counts")
+  gene_keep  <- rownames(counts_mat)[Matrix::rowSums(counts_mat > 0) > 5]
+  obj        <- subset(obj, features = gene_keep)
+
+  # HVG — exclude MT, ribosomal, and cell cycle genes
+  hvg <- VariableFeatures(FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000))
+  hvg <- hvg[!grepl("^RPL|^RPS|^MT-", hvg) & !hvg %in% unlist(cc.genes.updated.2019)]
+
+  obj_hvg <- c(unlist(fca_signatures), hvg) %>% unique() %>% intersect(rownames(obj))
+  obj     <- ScaleData(obj, features = obj_hvg)
+
+  print(paste("Running MCA on", di))
+  obj <- RunMCA(obj, nmcs = 50, assay = "RNA", slot = "data", features = obj_hvg)
+
+  cellid_enrichments <- RunCellHGT(obj, pathways = fca_signatures, dims = 1:50, n.features = 300)
+
+  cellid_labels <- rownames(cellid_enrichments)[apply(cellid_enrichments, 2, which.max)]
+  cellid_labels <- ifelse(apply(cellid_enrichments, 2, max) >= 2, cellid_labels, "unassigned")
+
+  cellid_orig <- as_tibble(cellid_labels, rownames = "cell_barcode") %>%
+    dplyr::select(cell_barcode, celltype = value)
+  cellid_orig$celltype <- sub("\\s*\\d+$", "", cellid_orig$celltype)
+
+  all_cellid_orig <- rbind(all_cellid_orig, cellid_orig)
+}
+```
+
+---
+
+## Step 5: Remap Labels and Save Tetraploid Annotations
+
+Same remapping logic as diploid — fine-grained reference categories collapsed
+to the 20 broad cell types used in the DD/DE analysis.
+
+```{r remap-celltype-labels-and-save}
+all_cellid_orig_merged <- all_cellid_orig %>%
+  mutate(celltype = replace(celltype, celltype == "Visceral neurons",            "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Chromaffin cells",            "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Sympathoblasts",              "ENS neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Schwann cells",               "ENS glia")) %>%
+  mutate(celltype = replace(celltype, celltype == "Ureteric bud cells",          "Metanephric cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Bipolar cells",               "Photoreceptor cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Thymocytes",                  "Lymphoid cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Mesothelial cells",           "Epicardial fat cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Amacrine cells",              "Horizontal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Ganglion cells",              "Horizontal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Lymphatic endothelial cells", "Vascular endothelial cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Mesangial cells",             "Stromal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Fibroblast",                  "Stromal cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Parietal and chief cells",    "Goblet cells")) %>%
+  mutate(celltype = replace(celltype, celltype == "Cardiac progenitor cells",    "Cardiomyocytes")) %>%
+  mutate(celltype = replace(celltype, celltype == "Horizontal cells",            "Retinal neurons")) %>%
+  mutate(celltype = replace(celltype, celltype == "Photoreceptor cells",         "Retinal neurons"))
+
+outpath <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+write.csv(all_cellid_orig_merged, paste0(outpath, "tetraploid_cell_annotations.csv"), row.names = FALSE)
+```
+
+```{r plot-celltype-distribution}
+cell_annotations_tetraploid <- read.csv(paste0(outpath, "tetraploid_cell_annotations.csv"))
+
+# Distribution of cell types
+plot_df <- cell_annotations_tetraploid %>%
+  dplyr::count(celltype, name = "n_cells") %>%
+  dplyr::arrange(desc(n_cells)) %>%
+  dplyr::mutate(celltype = factor(celltype, levels = celltype))
+
+ggplot(plot_df, aes(x = celltype, y = n_cells)) +
+  geom_col(fill = "steelblue") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Cell type", y = "Number of cells")
+
+table(cell_annotations_tetraploid$celltype)
+```
+
+---
+
+## Step 6: Load Human and Chimp Allele Objects
+
+Each lane was aligned separately to the human and chimp genomes. Load and merge
+across 8 lanes using the same BPCells-backed approach.
+
+```{r load-human-allele-data}
+bpcells_base <- '/project/gilad/awchen55/mechanism/data/tetraploid/'
+
+# Human allele reads
+obj_list <- mclapply(1:8, function(i) {
+  lane     <- paste0(i)
+  base_dir <- paste0("/project/gilad/kenneth/scale_project/tetraploid/alignment/",
+                     "Sample-Tetraploid.QSR-", lane, "/Sample-Tetraploid.QSR-", lane,
+                     ".star.align/split_bams/")
+  dirs      <- list.dirs(base_dir)
+  this.dirs <- dirs[grep(".human/Solo.out/GeneFull_Ex50pAS/raw", dirs, fixed = TRUE)]
+  obj       <- create_object(this.dirs, "")
+  this.bpcells <- paste0(bpcells_base, "tetraploid_human_", lane)
+  write_matrix_dir(mat = convert_matrix_type(obj[["RNA"]]$counts, "uint32_t"), dir = this.bpcells)
+  obj[["RNA"]]$counts <- open_matrix_dir(dir = this.bpcells)
+  obj$well <- lane; obj$species <- "human"
+  obj
+}, mc.cores = 8)
+obj_human <- merge(obj_list[[1]], obj_list[2:8])
+obj_human <- JoinLayers(obj_human)
+saveRDS(obj_human, paste0(bpcells_base, "tetraploid_human.rds"))
+```
+
+```{r load-chimp-allele-data}
+# Chimp allele reads
+obj_list <- mclapply(1:8, function(i) {
+  lane     <- paste0(i)
+  base_dir <- paste0("/project/gilad/kenneth/scale_project/tetraploid/alignment/",
+                     "Sample-Tetraploid.QSR-", lane, "/Sample-Tetraploid.QSR-", lane,
+                     ".star.align/split_bams/")
+  dirs      <- list.dirs(base_dir)
+  this.dirs <- dirs[grep(".chimp/Solo.out/GeneFull_Ex50pAS/raw", dirs, fixed = TRUE)]
+  obj       <- create_object(this.dirs, "")
+  this.bpcells <- paste0(bpcells_base, "tetraploid_chimp_", lane)
+  write_matrix_dir(mat = convert_matrix_type(obj[["RNA"]]$counts, "uint32_t"), dir = this.bpcells)
+  obj[["RNA"]]$counts <- open_matrix_dir(dir = this.bpcells)
+  obj$well <- lane; obj$species <- "chimp"
+  obj
+}, mc.cores = 8)
+obj_chimp <- merge(obj_list[[1]], obj_list[2:8])
+obj_chimp <- JoinLayers(obj_chimp)
+saveRDS(obj_chimp, paste0(bpcells_base, "tetraploid_chimp.rds"))
+```
+
+---
+
+## Step 7: Match Barcodes Across All Three Objects
+
+Cells must have a matching barcode in humanized, human, and chimp objects.
+This ensures each cell has expression data from both genome copies.
+
+```{r match-barcodes-across-objects}
+obj_humanized <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_humanized.rds")
+obj_human     <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_human.rds")
+obj_chimp     <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_chimp.rds")
+
+DefaultAssay(obj_humanized) <- "RNA"
+DefaultAssay(obj_human)     <- "RNA"
+DefaultAssay(obj_chimp)     <- "RNA"
+
+counts_humanized <- GetAssayData(obj_humanized, slot = "counts")
+counts_human     <- GetAssayData(obj_human,     slot = "counts")
+counts_chimp     <- GetAssayData(obj_chimp,     slot = "counts")
+
+# Strip species prefixes to get raw barcodes for matching
+colnames(counts_humanized) <- stringr::str_trim(colnames(counts_humanized))
+colnames(counts_human)     <- stringr::str_remove(colnames(counts_human), "^human_\\s*") %>% stringr::str_trim()
+colnames(counts_chimp)     <- stringr::str_remove(colnames(counts_chimp), "^chimp_\\s*") %>% stringr::str_trim()
+
+common_barcodes <- Reduce(intersect, list(
+  colnames(counts_humanized),
+  colnames(counts_human),
+  colnames(counts_chimp)
+))
+
+cat("Cells with matching barcodes across all three objects:", length(common_barcodes), "\n")
+
+# Check UMI allocation across alleles
+df <- data.frame(
+  barcode       = common_barcodes,
+  humanized_umi = Matrix::colSums(counts_humanized[, common_barcodes]),
+  human_umi     = Matrix::colSums(counts_human[,     common_barcodes]),
+  chimp_umi     = Matrix::colSums(counts_chimp[,     common_barcodes])
+) %>%
+  dplyr::mutate(
+    percent_human_kept = human_umi / humanized_umi,
+    percent_chimp_kept = chimp_umi / humanized_umi
+  )
+
+cat("Global % UMIs assigned to human allele:", round(100 * sum(df$human_umi) / sum(df$humanized_umi), 1), "\n")
+cat("Global % UMIs assigned to chimp allele:", round(100 * sum(df$chimp_umi) / sum(df$humanized_umi), 1), "\n")
+```
+
+---
+
+## Step 8: Add Cell Annotations and Build Combined Object
+
+```{r transfer-annotations-to-allele-objects}
+# Transfer tetraploid cell type labels onto human and chimp allele objects
+anno              <- cell_annotations_tetraploid
+rownames(anno)    <- anno$cell_barcode
+anno              <- anno[, "celltype", drop = FALSE]
+
+obj_human <- AddMetaData(obj_human, metadata = anno)
+obj_chimp <- AddMetaData(obj_chimp, metadata = anno)
+
+table(obj_human@meta.data$celltype)
+table(obj_chimp@meta.data$celltype)
+```
+
+```{r merge-human-chimp-objects}
+# Add species prefix to cell barcodes and merge into one object
+obj_chimp <- RenameCells(obj_chimp, add.cell.id = "chimp")
+obj_human <- RenameCells(obj_human, add.cell.id = "human")
+
+obj_tetraploid <- merge(x = obj_chimp, y = obj_human)
+obj_tetraploid <- JoinLayers(obj_tetraploid)
+```
+
+---
+
+## Step 9: Filter Genes and Cells
+
+Remove genes expressed in only one species (these cannot be used for
+cis/trans comparison). Filter to cells where the same barcode exists in
+both human and chimp allele data.
+
+```{r filter-species-specific-genes}
+obj_tetraploid[["percent.mt"]]     <- PercentageFeatureSet(obj_tetraploid, pattern = "^MT-")
+obj_tetraploid[["percent.rp"]]     <- PercentageFeatureSet(obj_tetraploid, pattern = "^RPS|^RPL")
+obj_tetraploid[["percent.malat1"]] <- PercentageFeatureSet(obj_tetraploid, pattern = "MALAT1")
+
+# Remove genes with zero expression in either species
+agg        <- AggregateExpression(obj_tetraploid, group.by = "species")
+rna        <- as.data.frame(agg$RNA)
+only_human <- rownames(rna %>% filter(chimp == 0 & human > 0))
+only_chimp <- rownames(rna %>% filter(chimp > 0 & human == 0))
+neither    <- rownames(rna %>% filter(chimp == 0 & human == 0))
+remove     <- unique(c(only_human, only_chimp, neither))
+
+cat("Genes removed (species-specific or absent):", length(remove), "\n")
+cat("Genes kept:", nrow(rna) - length(remove), "\n")
+
+obj_tetraploid <- subset(obj_tetraploid, features = setdiff(rownames(rna), remove))
+saveRDS(obj_tetraploid, file = "/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_combined.rds")
+```
+
+```{r filter-shared-barcode-cells}
+# Keep only cells with matching barcodes in both human and chimp
+cells   <- colnames(obj_tetraploid)
+species <- ifelse(grepl("^chimp_", cells), "chimp", ifelse(grepl("^human_", cells), "human", NA))
+barcode <- sub("^(chimp_|human_)", "", cells)
+
+shared_barcodes <- data.frame(cell = cells, species = species, barcode = barcode) %>%
+  dplyr::group_by(barcode) %>%
+  dplyr::filter(dplyr::n_distinct(species) == 2) %>%
+  dplyr::pull(barcode) %>%
+  unique()
+
+cells_keep     <- cells[sub("^(chimp_|human_)", "", cells) %in% shared_barcodes]
+obj_filtered   <- subset(obj_tetraploid, cells = cells_keep)
+
+# Additional QC: keep cells with > 1,000 features
+obj_filtered <- subset(obj_filtered, subset = nFeature_RNA > 1000)
+
+table(obj_filtered@meta.data$species, obj_filtered@meta.data$celltype)
+dim(obj_filtered)
+```
+
+```{r normalize-and-save-filtered-object}
+# Normalize and find variable features on the filtered combined object
+obj_filtered <- NormalizeData(obj_filtered)
+obj_filtered <- FindVariableFeatures(obj_filtered, nfeatures = 3000)
+saveRDS(obj_filtered, file = "/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_combined_variablfeatures_filtered.rds")
+
+# Save full metadata table
+metadata_tetraploid <- obj_filtered@meta.data %>%
+  tibble::rownames_to_column(var = "cell_barcode") %>%
+  dplyr::select(cell_barcode, dplyr::everything())
+
+write.csv(metadata_tetraploid,
+          paste0('/project/gilad/awchen55/mechanism/data/cell_annotations/', "tetraploid_metadata.csv"),
+          row.names = FALSE)
+```
+
+---
+
+## Step 10: Cell Count Summary — Diploid vs Tetraploid
+
+Compare cell counts across species and contexts. Filters applied:
+- Diploid: ≥ 1,000 cells in both human and chimp
+- Tetraploid: ≥ 300 cells
+
+```{r plot-diploid-vs-tetraploid-counts}
+path <- '/project/gilad/awchen55/mechanism/data/cell_annotations/'
+cell_annotations_diploid    <- read.csv(paste0(path, 'diploid_cell_annotations.csv'))
+metadata_tetraploid         <- read.csv(paste0(path, 'tetraploid_metadata.csv'))
+
+diploid_counts <- cell_annotations_diploid %>%
+  dplyr::mutate(
+    species = dplyr::case_when(
+      stringr::str_starts(cell_barcode, "chimp") ~ "Chimpanzee",
+      stringr::str_starts(cell_barcode, "human") ~ "Human",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::filter(!is.na(species), celltype != "unassigned") %>%
+  dplyr::count(celltype, species, name = "cell_count")
+
+# Count each cell only once (human allele copy) to avoid double-counting
+tetraploid_counts <- metadata_tetraploid %>%
+  dplyr::filter(stringr::str_starts(cell_barcode, "human_"), celltype != "unassigned") %>%
+  dplyr::count(celltype, name = "cell_count") %>%
+  dplyr::mutate(species = "Tetraploid")
+
+plot_df <- dplyr::bind_rows(diploid_counts, tetraploid_counts) %>%
+  tidyr::pivot_wider(names_from = species, values_from = cell_count, values_fill = 0) %>%
+  dplyr::filter(Human >= 1000, Chimpanzee >= 1000, Tetraploid >= 300) %>%
+  tidyr::pivot_longer(cols = c(Human, Chimpanzee, Tetraploid),
+                      names_to = "species", values_to = "cell_count") %>%
+  dplyr::group_by(celltype) %>%
+  dplyr::mutate(total_cells = sum(cell_count)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    celltype = reorder(celltype, -total_cells),
+    species  = factor(species, levels = c("Human", "Chimpanzee", "Tetraploid"))
+  )
+
+ggplot(plot_df, aes(x = celltype, y = cell_count, fill = species)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = cell_count), position = position_dodge(width = 0.8),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Human" = "#D55E00", "Chimpanzee" = "#0072B2", "Tetraploid" = "#009E73")) +
+  labs(x = "", y = "Number of Cells", fill = "") +
+  theme_classic() +
+  theme(
+    axis.text.x       = element_text(angle = 45, hjust = 1),
+    panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    legend.position   = c(0.88, 0.9),
+    legend.background = element_blank(),
+    legend.key        = element_blank()
+  ) +
+  expand_limits(y = max(plot_df$cell_count) * 1.1)
+```
+
+---
+
+## Step 11: Split by Cell Type and Export to AnnData
+
+```{r split-by-celltype}
+seurat_data <- readRDS("/project/gilad/awchen55/mechanism/data/tetraploid/tetraploid_combined_variablfeatures_filtered.rds")
+
+seurat_list <- SplitObject(seurat_data, split.by = "celltype")
+
+ct_outdir <- "/project/gilad/awchen55/mechanism/data/tetraploid/celltype/"
+for (ct in names(seurat_list)) {
+  saveRDS(seurat_list[[ct]],
+          file = file.path(ct_outdir,
+                           paste0("tetraploid_combined_variablfeatures_filtered_", ct, ".rds")))
+}
+```
+
+```{r export-to-anndata}
+# Cell types meeting minimum thresholds
+celltypes_keep <- dplyr::bind_rows(diploid_counts, tetraploid_counts) %>%
+  tidyr::pivot_wider(names_from = species, values_from = cell_count, values_fill = 0) %>%
+  dplyr::filter(Human >= 1000, Chimpanzee >= 1000, Tetraploid >= 300) %>%
+  dplyr::pull(celltype)
+
+ct_outdir   <- "/project/gilad/awchen55/mechanism/data/tetraploid/celltype/"
+export_base <- "/project/gilad/awchen55/mechanism/data/tetraploid/anndata_exports/"
+
+for (ct in celltypes_keep) {
+  ct2 <- gsub(" ", "_", ct)
+  message("Exporting ", ct)
+
+  seurat_sub <- readRDS(paste0(ct_outdir, "tetraploid_combined_variablfeatures_filtered_", ct, ".rds"))
+  DefaultAssay(seurat_sub) <- "RNA"
+  seurat_sub <- JoinLayers(seurat_sub, assay = "RNA")
+
+  chunk_dir <- paste0(export_base, ct2, "/")
+  dir.create(chunk_dir, showWarnings = FALSE, recursive = TRUE)
+
+  counts_mat <- as(seurat_sub[["RNA"]]$counts, "dgCMatrix")
+  Matrix::writeMM(counts_mat, file = paste0(chunk_dir, "counts.mtx"))
+
+  data_mat <- tryCatch(seurat_sub[["RNA"]]$data, error = function(e) NULL)
+  if (!is.null(data_mat)) Matrix::writeMM(as(data_mat, "dgCMatrix"), file = paste0(chunk_dir, "data.mtx"))
+
+  meta <- seurat_sub@meta.data
+  meta$cell_barcode <- rownames(meta)
+  write.csv(meta, file = paste0(chunk_dir, "metadata.csv"), row.names = FALSE, quote = TRUE)
+
+  write.csv(data.frame(gene = rownames(counts_mat)),
+            file = paste0(chunk_dir, "genes.csv"), row.names = FALSE, quote = FALSE)
+  write.csv(data.frame(cell_barcode = colnames(counts_mat)),
+            file = paste0(chunk_dir, "cells.csv"), row.names = FALSE, quote = FALSE)
+
+  for (red in c("pca", "umap", "tsne")) {
+    if (red %in% names(seurat_sub@reductions)) {
+      red_df <- as.data.frame(Embeddings(seurat_sub, reduction = red))
+      red_df$cell_barcode <- rownames(red_df)
+      write.csv(red_df, file = paste0(chunk_dir, red, ".csv"), row.names = FALSE, quote = TRUE)
+    }
+  }
+
+  rm(seurat_sub, counts_mat, data_mat, meta)
+  gc()
+}
+```
